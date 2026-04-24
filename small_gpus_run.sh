@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GPUS="${1:-0,1,2,3}"
+SECS="${2:-60}"
+LOG="${3:-small_gpus_$(date +%Y%m%d_%H%M%S).log}"
+
+CUDA_VISIBLE_DEVICES="$GPUS" python small_gpus.py "$GPUS" "$SECS" 2>&1 | tee "$LOG"

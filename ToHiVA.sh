@@ -1,0 +1,22 @@
+mkdir -p docs/notes
+mkdir -p src/lerobot/datasets
+mkdir -p src/lerobot/scripts
+mkdir -p src/lerobot/policies/smolvla
+mkdir -p smolvla
+
+cp ~/lerobot/check-dataset-format.py .
+cp ~/lerobot/docs/notes/duration_only_hiva_smolvla_notes.md docs/notes/
+cp ~/lerobot/eval_full.sh .
+cp ~/lerobot/eval_partial.sh .
+cp ~/lerobot/finetune.sh .
+cp ~/lerobot/finetune_bigbrain.sh .
+cp ~/lerobot/remove_env.sh .
+cp ~/lerobot/sanity-check.py .
+cp ~/lerobot/sanity-check.sh .
+cp ~/lerobot/small_gpus.py .
+cp ~/lerobot/small_gpus_run.sh .
+cp ~/lerobot/smolvla/build_hiva_duration_sidecar.py smolvla/
+cp ~/lerobot/smolvla/build_sidecar.sh smolvla/
+cp ~/lerobot/src/lerobot/datasets/hiva_duration_sidecar.py src/lerobot/datasets/
+cp ~/lerobot/src/lerobot/scripts/build_hiva_duration_sidecar.py src/lerobot/scripts/
+cp ~/lerobot/src/lerobot/policies/smolvla/modeling_smolvla.py src/lerobot/policies/smolvla/
