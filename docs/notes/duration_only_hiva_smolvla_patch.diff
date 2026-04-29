@@ -1,0 +1,1025 @@
+diff --git a/src/lerobot/policies/smolvla/configuration_smolvla.py b/src/lerobot/policies/smolvla/configuration_smolvla.py
+--- a/src/lerobot/policies/smolvla/configuration_smolvla.py
++++ b/src/lerobot/policies/smolvla/configuration_smolvla.py
+@@ class SmolVLAConfig(PreTrainedConfig):
+     # Finetuning settings
+     freeze_vision_encoder: bool = True
+     train_expert_only: bool = True
+     train_state_proj: bool = True
++
++    # Duration-only HiVA-lite.
++    # Keep the original SmolVLA raw-action chunk path unchanged, but predict
++    # a discrete execution prefix length and execute only that prefix.
++    use_duration_head: bool = False
++    duration_classes: tuple[int, ...] = (1, 3, 8)
++    duration_loss_weight: float = 1.0
++    duration_sidecar_path: str | None = None
+@@
+     def __post_init__(self):
+         super().__post_init__()
+         """Input validation (not exhaustive)."""
+         if self.n_action_steps > self.chunk_size:
+             raise ValueError(
+@@
+         if self.use_delta_joint_actions_aloha:
+             raise NotImplementedError(
+                 "`use_delta_joint_actions_aloha` is used by smolvla for aloha real models. "
+                 "It is not ported yet in LeRobot."
+             )
++
++        if self.use_duration_head:
++            if len(self.duration_classes) < 2:
++                raise ValueError("`duration_classes` must contain at least 2 values.")
++            if any(d <= 0 for d in self.duration_classes):
++                raise ValueError("All `duration_classes` entries must be positive integers.")
++            if tuple(sorted(self.duration_classes)) != tuple(self.duration_classes):
++                raise ValueError("`duration_classes` must be sorted in strictly increasing order.")
++            if max(self.duration_classes) > self.chunk_size:
++                raise ValueError(
++                    "The largest duration class cannot exceed `chunk_size`. "
++                    f"Got max(duration_classes)={max(self.duration_classes)} and chunk_size={self.chunk_size}."
++                )
++            if self.duration_loss_weight < 0:
++                raise ValueError("`duration_loss_weight` must be non-negative.")
+ 
+ diff --git a/src/lerobot/policies/smolvla/modeling_smolvla.py b/src/lerobot/policies/smolvla/modeling_smolvla.py
+--- a/src/lerobot/policies/smolvla/modeling_smolvla.py
++++ b/src/lerobot/policies/smolvla/modeling_smolvla.py
+@@ class SmolVLAPolicy(PreTrainedPolicy):
+     def __init__(
+         self,
+         config: SmolVLAConfig,
+         **kwargs,
+     ):
+@@
+         self.config = config
+         self.init_rtc_processor()
+         self.model = VLAFlowMatching(config, rtc_processor=self.rtc_processor)
++        self._last_duration_steps = None
+         self.reset()
+ 
+     def reset(self):
+         """This should be called whenever the environment is reset."""
+         self._queues = {
+             ACTION: deque(maxlen=self.config.n_action_steps),
+         }
++        self._last_duration_steps = None
+@@
+     def _get_action_chunk(
+         self, batch: dict[str, Tensor], noise: Tensor | None = None, **kwargs: Unpack[ActionSelectKwargs]
+-    ) -> Tensor:
++    ) -> Tensor | tuple[Tensor, Tensor]:
+         # TODO: Check if this for loop is needed.
+         for k in batch:
+             if k in self._queues and k != ACTION:
+                 batch[k] = torch.stack(list(self._queues[k]), dim=1)
+@@
+-        actions = self.model.sample_actions(
++        model_output = self.model.sample_actions(
+             images,
+             img_masks,
+             lang_tokens,
+             lang_masks,
+             state,
+             noise=noise,
+             **kwargs,
+         )
++
++        if self.config.use_duration_head:
++            actions, duration_steps = model_output
++            self._last_duration_steps = duration_steps
++        else:
++            actions = model_output
++            duration_steps = None
++            self._last_duration_steps = None
++
+         # Unpad actions
+         original_action_dim = self.config.action_feature.shape[0]
+         actions = actions[:, :, :original_action_dim]
+ 
+         if self.config.adapt_to_pi_aloha:
+             actions = self._pi_aloha_encode_actions(actions)
+-        return actions
++
++        if self.config.use_duration_head:
++            return actions, duration_steps
++        return actions
+@@
+     def predict_action_chunk(
+         self, batch: dict[str, Tensor], noise: Tensor | None = None, **kwargs: Unpack[ActionSelectKwargs]
+     ) -> Tensor:
+         self.eval()
+         batch = self._prepare_batch(batch)
+         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
+-        actions = self._get_action_chunk(batch, noise, **kwargs)
++        model_output = self._get_action_chunk(batch, noise, **kwargs)
++        if self.config.use_duration_head:
++            actions, _duration_steps = model_output
++        else:
++            actions = model_output
+         return actions
+@@
+     def select_action(
+         self, batch: dict[str, Tensor], noise: Tensor | None = None, **kwargs: Unpack[ActionSelectKwargs]
+     ) -> Tensor:
+@@
+         self.eval()
+         batch = self._prepare_batch(batch)
+         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
+         if self._check_get_actions_condition():
+-            actions = self._get_action_chunk(batch, noise)
++            model_output = self._get_action_chunk(batch, noise)
++
++            if self.config.use_duration_head:
++                actions, duration_steps = model_output
++                # `select_action` uses a single shared queue. If several environments are batched,
++                # use the most conservative horizon.
++                execution_horizon = int(duration_steps.reshape(-1).min().item())
++                execution_horizon = max(1, min(execution_horizon, actions.shape[1], self.config.n_action_steps))
++            else:
++                actions = model_output
++                execution_horizon = self.config.n_action_steps
++
+             # `self.predict_action_chunk` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
+             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
+-            self._queues[ACTION].extend(actions.transpose(0, 1)[: self.config.n_action_steps])
++            self._queues[ACTION].extend(actions.transpose(0, 1)[:execution_horizon])
+ 
+         return self._queues[ACTION].popleft()
+@@
+     def forward(
+         self, batch: dict[str, Tensor], noise=None, time=None, reduction: str = "mean"
+     ) -> dict[str, Tensor]:
+@@
+         actions = self.prepare_action(batch)
+         actions_is_pad = batch.get("action_is_pad")
+ 
+         loss_dict = {}
+ 
+-        losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
++        model_output = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
++        if self.config.use_duration_head:
++            losses, duration_logits = model_output
++        else:
++            losses = model_output
++            duration_logits = None
++
+         original_action_dim = self.config.action_feature.shape[0]
+         losses = losses[:, :, :original_action_dim]
+         loss_dict["losses_after_forward"] = losses.clone().mean().item()
+@@
+         # Remove padding
+         losses = losses[:, :, : self.config.max_action_dim]
+         loss_dict["losses_after_rm_padding"] = losses.clone().mean().item()
++
++        duration_loss = None
++        per_sample_duration_loss = None
++        if self.config.use_duration_head:
++            if "duration_class" not in batch:
++                raise KeyError(
++                    "`duration_class` is missing from the training batch. "
++                    "Enable the duration sidecar wrapper or inject the label in your custom dataset."
++                )
++
++            duration_target = batch["duration_class"].long()
++            duration_logits = duration_logits.to(dtype=torch.float32)
++            per_sample_duration_loss = F.cross_entropy(duration_logits, duration_target, reduction="none")
++            duration_loss = per_sample_duration_loss.mean()
++
++            duration_values = torch.as_tensor(
++                self.config.duration_classes,
++                device=duration_logits.device,
++                dtype=torch.long,
++            )
++            duration_pred = duration_logits.argmax(dim=-1)
++            loss_dict["duration_loss"] = duration_loss.item()
++            loss_dict["duration_acc"] = (duration_pred == duration_target).float().mean().item()
++            loss_dict["duration_pred_mean"] = duration_values[duration_pred].float().mean().item()
++            loss_dict["duration_target_mean"] = duration_values[duration_target].float().mean().item()
+ 
+         if reduction == "none":
+             # Return per-sample losses (B,) by averaging over valid (time, action) entries
+             if actions_is_pad is None:
+-                per_sample_loss = losses.mean(dim=(1, 2))
++                per_sample_action_loss = losses.mean(dim=(1, 2))
+             else:
+                 num_valid = ((~actions_is_pad).sum(dim=1) * losses.shape[-1]).clamp_min(1)
+-                per_sample_loss = losses.sum(dim=(1, 2)) / num_valid
++                per_sample_action_loss = losses.sum(dim=(1, 2)) / num_valid
++
++            per_sample_loss = per_sample_action_loss
++            if per_sample_duration_loss is not None:
++                per_sample_loss = per_sample_loss + self.config.duration_loss_weight * per_sample_duration_loss
++
++            loss_dict["action_loss"] = per_sample_action_loss.mean().item()
+             loss_dict["loss"] = per_sample_loss.mean().item()
+             return per_sample_loss, loss_dict
+         else:
+             # Default: return scalar mean loss over valid (time, action) entries
+             if actions_is_pad is None:
+-                loss = losses.mean()
++                action_loss = losses.mean()
+             else:
+                 num_valid = ((~actions_is_pad).sum() * losses.shape[-1]).clamp_min(1)
+-                loss = losses.sum() / num_valid
+-            loss_dict["loss"] = loss.item()
++                action_loss = losses.sum() / num_valid
++
++            loss = action_loss
++            if duration_loss is not None:
++                loss = loss + self.config.duration_loss_weight * duration_loss
++
++            loss_dict["action_loss"] = action_loss.item()
++            loss_dict["loss"] = loss.item()
+             return loss, loss_dict
+@@
+     def _get_default_peft_targets(self) -> dict[str, any]:
+         """Return default PEFT target modules for SmolVLA fine-tuning."""
+-        common_projections = (
+-            "state_proj|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out"
+-        )
++        common_projections = (
++            "state_proj|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out|duration_head"
++        )
+         target_modules = rf"(model\.vlm_with_expert\.lm_expert\..*\.(q|v)_proj|model\.({common_projections}))"
+         return {
+             "target_modules": target_modules,
+             "modules_to_save": [],
+         }
+@@ class VLAFlowMatching(nn.Module):
+     def __init__(self, config: SmolVLAConfig, rtc_processor: RTCProcessor | None = None):
+         super().__init__()
+         self.config = config
+@@
+         self.action_time_mlp_in = nn.Linear(
+             self.vlm_with_expert.expert_hidden_size * 2,
+             self.vlm_with_expert.expert_hidden_size,
+         )
+         self.action_time_mlp_out = nn.Linear(
+             self.vlm_with_expert.expert_hidden_size,
+             self.vlm_with_expert.expert_hidden_size,
+         )
++        self.duration_head = None
++        if self.config.use_duration_head:
++            self.duration_head = nn.Linear(
++                self.vlm_with_expert.expert_hidden_size,
++                len(self.config.duration_classes),
++            )
+         self.set_requires_grad()
+@@
+     def set_requires_grad(self):
+         for params in self.state_proj.parameters():
+             params.requires_grad = self.config.train_state_proj
++
++    def _duration_logits_from_suffix(self, suffix_out: Tensor) -> Tensor | None:
++        if not self.config.use_duration_head:
++            return None
++        pooled_suffix = suffix_out.mean(dim=1)
++        return self.duration_head(pooled_suffix)
++
++    def _duration_steps_from_logits(self, duration_logits: Tensor) -> Tensor:
++        duration_classes = torch.as_tensor(
++            self.config.duration_classes,
++            device=duration_logits.device,
++            dtype=torch.long,
++        )
++        duration_ids = duration_logits.argmax(dim=-1)
++        return duration_classes[duration_ids]
+@@
+     def forward(
+         self,
+         images,
+@@
+         suffix_out = suffix_out[:, -self.config.chunk_size :]
+         # Original openpi code, upcast attention output
+         suffix_out = suffix_out.to(dtype=torch.float32)
+         v_t = self.action_out_proj(suffix_out)
+         losses = F.mse_loss(u_t, v_t, reduction="none")
+-        return losses
++        if self.config.use_duration_head:
++            duration_logits = self._duration_logits_from_suffix(suffix_out)
++            return losses, duration_logits
++        return losses
+@@
+     def sample_actions(
+         self, images, img_masks, lang_tokens, lang_masks, state, noise=None, **kwargs: Unpack[ActionSelectKwargs]
+-    ) -> Tensor:
++    ) -> Tensor | tuple[Tensor, Tensor]:
+         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+@@
+         for step in range(num_steps):
+             time = 1.0 + step * dt
+             time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
+@@
+             x_t = x_t + dt * v_t
+             if self.rtc_processor is not None and self.rtc_processor.is_debug_enabled():
+                 self.rtc_processor.track(time=time, x_t=x_t, v_t=v_t)
+-        return x_t
++
++        if self.config.use_duration_head:
++            final_timestep = torch.zeros(bsize, dtype=torch.float32, device=device)
++            duration_logits = self.predict_duration_logits(
++                prefix_pad_masks=prefix_pad_masks,
++                past_key_values=past_key_values,
++                x_t=x_t,
++                timestep=final_timestep,
++            )
++            duration_steps = self._duration_steps_from_logits(duration_logits)
++            return x_t, duration_steps
++
++        return x_t
++
++    def predict_duration_logits(self, prefix_pad_masks, past_key_values, x_t, timestep):
++        """Run one extra suffix pass on the final denoised chunk to estimate duration."""
++        suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep)
++        suffix_len = suffix_pad_masks.shape[1]
++        batch_size = prefix_pad_masks.shape[0]
++        prefix_len = prefix_pad_masks.shape[1]
++
++        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
++        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
++        full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
++
++        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
++        position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
++
++        outputs_embeds, _ = self.vlm_with_expert.forward(
++            attention_mask=full_att_2d_masks,
++            position_ids=position_ids,
++            past_key_values=past_key_values,
++            inputs_embeds=[None, suffix_embs],
++            use_cache=self.config.use_cache,
++            fill_kv_cache=False,
++        )
++
++        suffix_out = outputs_embeds[1]
++        suffix_out = suffix_out[:, -self.config.chunk_size :]
++        suffix_out = suffix_out.to(dtype=torch.float32)
++        return self._duration_logits_from_suffix(suffix_out)
+ 
+ diff --git a/src/lerobot/datasets/factory.py b/src/lerobot/datasets/factory.py
+--- a/src/lerobot/datasets/factory.py
++++ b/src/lerobot/datasets/factory.py
+@@
+ from .dataset_metadata import LeRobotDatasetMetadata
++from .hiva_duration_sidecar import DurationSidecarDataset
+ from .lerobot_dataset import LeRobotDataset
+ from .multi_dataset import MultiLeRobotDataset
+ from .streaming_dataset import StreamingLeRobotDataset
+@@
+     if cfg.dataset.use_imagenet_stats:
+         for key in dataset.meta.camera_keys:
+             for stats_type, stats in IMAGENET_STATS.items():
+                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
++
++    if getattr(cfg.policy, "use_duration_head", False):
++        sidecar_path = getattr(cfg.policy, "duration_sidecar_path", None)
++        if not sidecar_path:
++            raise ValueError(
++                "`policy.use_duration_head=true` requires `policy.duration_sidecar_path` during training."
++            )
++        dataset = DurationSidecarDataset(dataset, sidecar_path)
++
+     return dataset
+ 
+ diff --git a/src/lerobot/datasets/hiva_duration_sidecar.py b/src/lerobot/datasets/hiva_duration_sidecar.py
+new file mode 100644
+--- /dev/null
++++ b/src/lerobot/datasets/hiva_duration_sidecar.py
+@@ -0,0 +1,169 @@
++from __future__ import annotations
++
++import csv
++import json
++import warnings
++from pathlib import Path
++from typing import Any
++
++import torch
++
++
++class DurationSidecarDataset(torch.utils.data.Dataset):
++    """Attach duration labels from a sidecar table without modifying the base LeRobot dataset.
++
++    This version is tailored to a LeRobot v3 dataset that exposes stable frame identifiers in the
++    raw parquet rows:
++
++    - ``index``          : global frame id across the whole dataset
++    - ``episode_index``  : episode id
++    - ``frame_index``    : frame id within the episode
++
++    Expected sidecar columns:
++        - dataset_index  (required; copied from raw v3 ``index``)
++        - episode_index  (required)
++        - frame_index    (required)
++        - duration_class (required)
++        - duration_label (optional)
++
++    Matching strategy:
++        1. Look up the sidecar row by the raw dataset ``index`` (primary key).
++        2. Verify that ``episode_index`` and ``frame_index`` also match.
++
++    A subset sidecar is useful for quick review/debugging, but it will not cover the full training
++    dataset. In that case this wrapper emits an early warning and later raises once an uncovered
++    sample is requested.
++    """
++
++    REQUIRED_KEYS = ("dataset_index", "episode_index", "frame_index", "duration_class")
++    RAW_ID_KEYS = ("index", "episode_index", "frame_index")
++
++    def __init__(self, dataset, sidecar_path: str | Path):
++        self.dataset = dataset
++        self.sidecar_path = Path(sidecar_path)
++        rows = self._load_rows(self.sidecar_path)
++        if not rows:
++            raise ValueError(f"Sidecar at {self.sidecar_path} is empty.")
++
++        self._by_dataset_index: dict[int, dict[str, Any]] = {}
++        self._by_episode_frame: dict[tuple[int, int], dict[str, Any]] = {}
++        for row in rows:
++            missing = [k for k in self.REQUIRED_KEYS if row.get(k) in (None, "")]
++            if missing:
++                raise ValueError(
++                    f"Sidecar row is missing required keys {missing}. Row excerpt: "
++                    f"{ {k: row.get(k) for k in ('dataset_index', 'episode_index', 'frame_index', 'duration_class')} }"
++                )
++
++            dataset_index = int(row["dataset_index"])
++            episode_index = int(row["episode_index"])
++            frame_index = int(row["frame_index"])
++            key = (episode_index, frame_index)
++
++            if dataset_index in self._by_dataset_index:
++                raise ValueError(f"Duplicate `dataset_index`={dataset_index} found in {self.sidecar_path}.")
++            if key in self._by_episode_frame:
++                raise ValueError(
++                    f"Duplicate (`episode_index`, `frame_index`)={key} found in {self.sidecar_path}."
++                )
++
++            self._by_dataset_index[dataset_index] = row
++            self._by_episode_frame[key] = row
++
++        if len(self._by_dataset_index) != len(rows):
++            raise ValueError("Internal error: sidecar indexing by `dataset_index` lost rows.")
++
++        if len(rows) != len(dataset):
++            warnings.warn(
++                "The duration sidecar covers a different number of rows than the wrapped dataset "
++                f"({len(rows)} vs {len(dataset)}). This is expected for a quick subset-review sidecar, "
++                "but full-dataset training requires full coverage.",
++                stacklevel=2,
++            )
++
++        self.meta = dataset.meta
++
++    def __len__(self):
++        return len(self.dataset)
++
++    @property
++    def num_frames(self):
++        return self.dataset.num_frames
++
++    @property
++    def num_episodes(self):
++        return self.dataset.num_episodes
++
++    def __getattr__(self, name):
++        return getattr(self.dataset, name)
++
++    def _load_rows(self, path: Path) -> list[dict[str, Any]]:
++        suffix = path.suffix.lower()
++        if suffix in {".parquet", ".pq"}:
++            import pyarrow.parquet as pq
++
++            return pq.read_table(path).to_pylist()
++        if suffix in {".jsonl", ".json"}:
++            with path.open("r", encoding="utf-8") as f:
++                return [json.loads(line) for line in f if line.strip()]
++        if suffix == ".csv":
++            with path.open("r", encoding="utf-8", newline="") as f:
++                return list(csv.DictReader(f))
++        raise ValueError(f"Unsupported sidecar format for {path}. Use Parquet, JSONL, or CSV.")
++
++    def _get_raw_row(self, idx: int) -> dict[str, Any]:
++        if hasattr(self.dataset, "get_raw_item"):
++            raw = self.dataset.get_raw_item(idx)
++        elif hasattr(self.dataset, "hf_dataset"):
++            raw = self.dataset.hf_dataset[idx]
++        else:
++            raise AttributeError(
++                "The wrapped dataset does not expose `get_raw_item(idx)` or `hf_dataset[idx]`, "
++                "so the duration sidecar cannot recover raw v3 frame identifiers."
++            )
++
++        missing = [k for k in self.RAW_ID_KEYS if k not in raw]
++        if missing:
++            raise KeyError(
++                "The wrapped dataset raw row does not expose the required v3 identifiers. "
++                f"Missing keys: {missing}. Available keys: {sorted(raw.keys())}"
++            )
++        return raw
++
++    def _row_for_index(self, idx: int) -> tuple[dict[str, Any], int, int, int]:
++        raw = self._get_raw_row(idx)
++        dataset_index = int(raw["index"])
++        episode_index = int(raw["episode_index"])
++        frame_index = int(raw["frame_index"])
++
++        row = self._by_dataset_index.get(dataset_index)
++        if row is None:
++            row = self._by_episode_frame.get((episode_index, frame_index))
++
++        if row is None:
++            raise KeyError(
++                "Could not match a duration sidecar row for sample "
++                f"(dataset_index={dataset_index}, episode_index={episode_index}, frame_index={frame_index}). "
++                "If you built only a subset sidecar, rebuild a full sidecar before full-dataset training."
++            )
++
++        row_episode_index = int(row["episode_index"])
++        row_frame_index = int(row["frame_index"])
++        if row_episode_index != episode_index or row_frame_index != frame_index:
++            raise ValueError(
++                "Sidecar key mismatch: the row found by `dataset_index` does not agree with the "
++                "dataset's (`episode_index`, `frame_index`). "
++                f"dataset_index={dataset_index}, dataset says ({episode_index}, {frame_index}), "
++                f"sidecar says ({row_episode_index}, {row_frame_index})."
++            )
++
++        return row, dataset_index, episode_index, frame_index
++
++    def __getitem__(self, idx):
++        sample = self.dataset[idx]
++        row, dataset_index, _episode_index, _frame_index = self._row_for_index(idx)
++
++        sample["duration_class"] = torch.tensor(int(row["duration_class"]), dtype=torch.long)
++        if row.get("duration_label") not in (None, ""):
++            sample["duration_label"] = torch.tensor(int(row["duration_label"]), dtype=torch.long)
++        return sample
+diff --git a/src/lerobot/scripts/build_hiva_duration_sidecar.py b/src/lerobot/scripts/build_hiva_duration_sidecar.py
+new file mode 100644
+--- /dev/null
++++ b/src/lerobot/scripts/build_hiva_duration_sidecar.py
+@@ -0,0 +1,462 @@
++from __future__ import annotations
++
++import argparse
++import json
++from collections import Counter, defaultdict
++from dataclasses import dataclass
++from pathlib import Path
++
++import numpy as np
++import pyarrow as pa
++import pyarrow.dataset as pads
++import pyarrow.parquet as pq
++
++from lerobot.utils.constants import ACTION, OBS_STATE
++
++
++DURATIONS = (1, 3, 8)
++REQUIRED_FEATURES = (ACTION, OBS_STATE, "index", "episode_index", "frame_index")
++
++
++@dataclass(frozen=True)
++class EpisodeRange:
++    episode_index: int
++    dataset_from_index: int
++    dataset_to_index: int
++
++
++def parse_int_ranges(spec: str | None) -> list[int] | None:
++    if spec is None:
++        return None
++    values: list[int] = []
++    for chunk in spec.split(","):
++        token = chunk.strip()
++        if not token:
++            continue
++        if "-" in token:
++            left, right = token.split("-", 1)
++            start = int(left)
++            end = int(right)
++            if end < start:
++                raise ValueError(f"Invalid descending range: {token}")
++            values.extend(range(start, end + 1))
++        else:
++            values.append(int(token))
++    return sorted(set(values))
++
++
++def switch_times(binary_state):
++    return np.where(binary_state[1:] != binary_state[:-1])[0] + 1
++
++
++def command_state_from_libero_action(actions, delta=0.1):
++    """
++    actions: [T, 7] raw LIBERO actions.
++    Returns close_state: 1=close command, 0=open command.
++    Native assumption: action[-1] < 0 opens, action[-1] > 0 closes.
++    """
++    u = actions[:, -1]
++    close_state = np.zeros(len(u), dtype=np.int64)
++
++    active = np.where(np.abs(u) > delta)[0]
++    if len(active) == 0:
++        return close_state
++
++    first = active[0]
++    close_state[:first] = int(u[first] > delta)
++    for t in range(first, len(u)):
++        if u[t] > delta:
++            close_state[t] = 1
++        elif u[t] < -delta:
++            close_state[t] = 0
++        else:
++            close_state[t] = close_state[t - 1]
++    return close_state
++
++
++def gripper_width_from_state(state):
++    q_pair = state[:, -2:]
++    return np.mean(np.abs(q_pair), axis=-1)
++
++
++def open_state_from_qpos_hysteresis(state, low_pct=10, high_pct=90, alpha_closed=0.35, alpha_open=0.65):
++    q_width = gripper_width_from_state(state)
++    q_low = np.percentile(q_width, low_pct)
++    q_high = np.percentile(q_width, high_pct)
++
++    if q_high - q_low < 1e-6:
++        open_state = np.zeros(len(q_width), dtype=np.int64)
++        return open_state, q_width, (q_low, q_high, q_low, q_high)
++
++    q_closed_thr = q_low + alpha_closed * (q_high - q_low)
++    q_open_thr = q_low + alpha_open * (q_high - q_low)
++
++    open_state = np.zeros(len(q_width), dtype=np.int64)
++    midpoint = 0.5 * (q_low + q_high)
++    open_state[0] = int(q_width[0] > midpoint)
++
++    for t in range(1, len(q_width)):
++        if q_width[t] > q_open_thr:
++            open_state[t] = 1
++        elif q_width[t] < q_closed_thr:
++            open_state[t] = 0
++        else:
++            open_state[t] = open_state[t - 1]
++
++    thresholds = (q_low, q_high, q_closed_thr, q_open_thr)
++    return open_state, q_width, thresholds
++
++
++def merge_close_events(events, merge_window=3):
++    events = np.array(sorted(set(map(int, events))), dtype=np.int64)
++    if len(events) == 0:
++        return events
++    merged = [events[0]]
++    for e in events[1:]:
++        if e - merged[-1] > merge_window:
++            merged.append(e)
++    return np.array(merged, dtype=np.int64)
++
++
++def find_neighbor_events(s, events, T):
++    prev_events = events[events <= s]
++    next_events = events[events > s]
++    prev_e = int(prev_events[-1]) if len(prev_events) else 0
++    next_e = int(next_events[0]) if len(next_events) else T
++    return prev_e, next_e
++
++
++def horizon_safe_duration_label(s, events, T, W1=4, W3=6):
++    prev_e, next_e = find_neighbor_events(s, events, T)
++    if s - prev_e < W1:
++        return 1
++    if next_e - s <= W1:
++        return 1
++    if (s - prev_e >= W1 + W3) and (s + 8 <= next_e - W1):
++        return 8
++    if s + 3 <= next_e - W1:
++        return 3
++    return 1
++
++
++def classify_phase(s, d, events, T, W1=4, W3=6):
++    near_gripper = any((s < int(e) + W1) and (s + d > int(e) - W1) for e in events)
++    if near_gripper:
++        return "near_gripper", True
++    prev_e, next_e = find_neighbor_events(s, events, T)
++    if (s >= prev_e + W1 + W3) and (s + d <= next_e - W1 - W3):
++        return "free_motion", False
++    return "other", False
++
++
++def detect_events_and_labels(actions, state, W1=4, W3=6, merge_window=3):
++    T = len(actions)
++    close_cmd = command_state_from_libero_action(actions)
++    cmd_switches = switch_times(close_cmd)
++
++    open_qpos, q_width, q_thresholds = open_state_from_qpos_hysteresis(state)
++    qpos_switches = switch_times(open_qpos)
++
++    events = merge_close_events(np.concatenate([cmd_switches, qpos_switches]), merge_window=merge_window)
++
++    duration_labels = np.array(
++        [horizon_safe_duration_label(s, events, T, W1=W1, W3=W3) for s in range(T)],
++        dtype=np.int64,
++    )
++
++    duration_to_class = {1: 0, 3: 1, 8: 2}
++    duration_classes = np.array([duration_to_class[int(d)] for d in duration_labels], dtype=np.int64)
++
++    return {
++        "events": events,
++        "cmd_switches": cmd_switches,
++        "qpos_switches": qpos_switches,
++        "q_width": q_width,
++        "q_thresholds": q_thresholds,
++        "duration_labels": duration_labels,
++        "duration_classes": duration_classes,
++    }
++
++
++def load_info(root: Path) -> dict:
++    info_path = root / "meta" / "info.json"
++    info = json.loads(info_path.read_text())
++    features = set(info.get("features", {}).keys())
++    missing = [k for k in REQUIRED_FEATURES if k not in features]
++    if missing:
++        raise KeyError(
++            f"Dataset at {root} is missing required v3 features {missing}. Found: {sorted(features)}"
++        )
++    return info
++
++
++def load_episode_ranges(root: Path) -> list[EpisodeRange]:
++    episodes_dir = root / "meta" / "episodes"
++    ep_ds = pads.dataset(str(episodes_dir), format="parquet")
++    required = ("episode_index", "dataset_from_index", "dataset_to_index")
++    missing = [k for k in required if k not in ep_ds.schema.names]
++    if missing:
++        raise KeyError(
++            f"Episode metadata under {episodes_dir} is missing required columns {missing}. "
++            f"Found: {ep_ds.schema.names}"
++        )
++
++    table = ep_ds.to_table(columns=list(required))
++    ranges = [
++        EpisodeRange(
++            episode_index=int(row["episode_index"]),
++            dataset_from_index=int(row["dataset_from_index"]),
++            dataset_to_index=int(row["dataset_to_index"]),
++        )
++        for row in table.to_pylist()
++    ]
++    ranges.sort(key=lambda r: r.episode_index)
++    return ranges
++
++
++def select_episode_ranges(
++    episode_ranges: list[EpisodeRange],
++    episode_indices: list[int] | None,
++    episode_start: int | None,
++    max_episodes: int | None,
++) -> list[EpisodeRange]:
++    if episode_indices:
++        wanted = set(episode_indices)
++        selected = [r for r in episode_ranges if r.episode_index in wanted]
++        found = {r.episode_index for r in selected}
++        missing = sorted(wanted - found)
++        if missing:
++            raise ValueError(f"Requested episode indices were not found: {missing}")
++        selected.sort(key=lambda r: r.episode_index)
++        return selected
++
++    selected = episode_ranges
++    if episode_start is not None:
++        selected = [r for r in selected if r.episode_index >= episode_start]
++    if max_episodes is not None:
++        selected = selected[:max_episodes]
++    return selected
++
++
++
++
++def merge_contiguous_spans(selected_ranges: list[EpisodeRange]) -> list[tuple[int, int]]:
++    if not selected_ranges:
++        return []
++
++    ordered = sorted(selected_ranges, key=lambda r: (r.dataset_from_index, r.dataset_to_index))
++    spans: list[tuple[int, int]] = []
++    cur_from = ordered[0].dataset_from_index
++    cur_to = ordered[0].dataset_to_index
++    for r in ordered[1:]:
++        if r.dataset_from_index == cur_to:
++            cur_to = r.dataset_to_index
++        else:
++            spans.append((cur_from, cur_to))
++            cur_from = r.dataset_from_index
++            cur_to = r.dataset_to_index
++    spans.append((cur_from, cur_to))
++    return spans
++
++def load_frame_rows(root: Path, selected_ranges: list[EpisodeRange]) -> list[dict]:
++    data_dir = root / "data"
++    data_ds = pads.dataset(str(data_dir), format="parquet")
++    needed = [ACTION, OBS_STATE, "index", "episode_index", "frame_index"]
++    if "task_index" in data_ds.schema.names:
++        needed.append("task_index")
++
++    if not selected_ranges:
++        return []
++
++    spans = merge_contiguous_spans(selected_ranges)
++    if len(spans) == 1:
++        start, end = spans[0]
++        filt = (pads.field("index") >= start) & (pads.field("index") < end)
++        return data_ds.to_table(columns=needed, filter=filt).to_pylist()
++
++    tables = []
++    idx_field = pads.field("index")
++    for start, end in spans:
++        filt = (idx_field >= start) & (idx_field < end)
++        tables.append(data_ds.to_table(columns=needed, filter=filt))
++
++    if not tables:
++        return []
++    return pa.concat_tables(tables).to_pylist()
++
++
++def write_rows(rows, output_path: Path):
++    output_path.parent.mkdir(parents=True, exist_ok=True)
++    suffix = output_path.suffix.lower()
++    if suffix in {".parquet", ".pq"}:
++        table = pa.Table.from_pylist(rows)
++        pq.write_table(table, output_path)
++        return
++    if suffix in {".jsonl", ".json"}:
++        with output_path.open("w", encoding="utf-8") as f:
++            for row in rows:
++                f.write(json.dumps(row) + "\n")
++        return
++    raise ValueError("Use a `.parquet` or `.jsonl` output file.")
++
++
++def maybe_write_summary(summary: dict, summary_json: Path | None):
++    if summary_json is None:
++        return
++    summary_json.parent.mkdir(parents=True, exist_ok=True)
++    with summary_json.open("w", encoding="utf-8") as f:
++        json.dump(summary, f, indent=2, sort_keys=True)
++
++
++def build_sidecar_rows_from_frame_rows(frame_rows, W1=4, W3=6, merge_window=3, labeler_version="hiva_duration_v2"):
++    grouped = defaultdict(list)
++    for row in frame_rows:
++        grouped[int(row["episode_index"])].append(row)
++
++    rows_out = []
++    for episode_index in sorted(grouped):
++        rows = sorted(grouped[episode_index], key=lambda r: (int(r["frame_index"]), int(r["index"])))
++
++        actual_frame_indices = [int(r["frame_index"]) for r in rows]
++        expected = list(range(len(rows)))
++        if actual_frame_indices != expected:
++            print(
++                "[warn] episode_index={} has non-canonical frame_index ordering; using sorted order for labeling. "
++                "First frame indices: {}".format(episode_index, actual_frame_indices[:10])
++            )
++
++        actions = np.stack([np.asarray(row[ACTION], dtype=np.float32) for row in rows], axis=0)
++        state = np.stack([np.asarray(row[OBS_STATE], dtype=np.float32) for row in rows], axis=0)
++        meta = detect_events_and_labels(actions, state, W1=W1, W3=W3, merge_window=merge_window)
++
++        cmd_switches = set(map(int, meta["cmd_switches"]))
++        qpos_switches = set(map(int, meta["qpos_switches"]))
++        events = np.asarray(meta["events"], dtype=np.int64)
++        T = len(rows)
++
++        episode_task_index = int(rows[0].get("task_index", -1)) if rows[0].get("task_index") is not None else -1
++        for local_pos, row in enumerate(rows):
++            dataset_index = int(row["index"])
++            frame_index = int(row["frame_index"])
++            duration_label = int(meta["duration_labels"][local_pos])
++            duration_class = int(meta["duration_classes"][local_pos])
++            phase, near_gripper = classify_phase(local_pos, duration_label, events, T, W1=W1, W3=W3)
++            dist_to_switch = int(min([abs(local_pos - int(e)) for e in events], default=T))
++
++            sidecar_row = {
++                "dataset_index": dataset_index,
++                "episode_index": int(episode_index),
++                "frame_index": frame_index,
++                "task_index": episode_task_index,
++                "episode_length": T,
++                "duration_label": duration_label,
++                "duration_class": duration_class,
++                "phase": phase,
++                "near_gripper": int(near_gripper),
++                "dist_to_switch": dist_to_switch,
++                "cmd_switch": int(local_pos in cmd_switches),
++                "qpos_switch": int(local_pos in qpos_switches),
++                "labeler_version": labeler_version,
++            }
++            rows_out.append(sidecar_row)
++
++    return rows_out
++
++
++def build_summary(rows: list[dict], dataset_root: str, dataset_repo_id: str, selected_ranges: list[EpisodeRange]) -> dict:
++    label_counts = Counter(int(row["duration_label"]) for row in rows)
++    class_counts = Counter(int(row["duration_class"]) for row in rows)
++    per_episode = Counter(int(row["episode_index"]) for row in rows)
++    summary = {
++        "dataset_root": dataset_root,
++        "dataset_repo_id": dataset_repo_id,
++        "num_rows": len(rows),
++        "num_episodes": len(per_episode),
++        "selected_episode_indices": [int(r.episode_index) for r in selected_ranges],
++        "selected_episode_ranges": [
++            {
++                "episode_index": int(r.episode_index),
++                "dataset_from_index": int(r.dataset_from_index),
++                "dataset_to_index": int(r.dataset_to_index),
++            }
++            for r in selected_ranges
++        ],
++        "duration_label_counts": {str(k): int(v) for k, v in sorted(label_counts.items())},
++        "duration_class_counts": {str(k): int(v) for k, v in sorted(class_counts.items())},
++        "rows_per_episode": {str(k): int(v) for k, v in sorted(per_episode.items())},
++    }
++    return summary
++
++
++def main():
++    parser = argparse.ArgumentParser(
++        description=(
++            "Build a duration-only HiVA-lite sidecar for a local LeRobot v3 dataset. "
++            "Subset selection is episode-based so each labeled row still sees its full episode context."
++        )
++    )
++    parser.add_argument("--dataset.repo-id", dest="repo_id", required=True)
++    parser.add_argument("--dataset.root", dest="root", required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    parser.add_argument("--w1", type=int, default=4)
++    parser.add_argument("--w3", type=int, default=6)
++    parser.add_argument("--merge-window", type=int, default=3)
++    parser.add_argument("--labeler-version", type=str, default="hiva_duration_v2")
++    parser.add_argument(
++        "--episode-indices",
++        type=str,
++        default=None,
++        help="Comma/range list of episode ids to build, e.g. '0-7,10,12'.",
++    )
++    parser.add_argument(
++        "--episode-start",
++        type=int,
++        default=None,
++        help="First episode index to include when `--episode-indices` is not given.",
++    )
++    parser.add_argument(
++        "--max-episodes",
++        type=int,
++        default=None,
++        help="Maximum number of episodes to include after `--episode-start` filtering.",
++    )
++    parser.add_argument(
++        "--summary-json",
++        type=Path,
++        default=None,
++        help="Optional JSON summary for quick label review.",
++    )
++    args = parser.parse_args()
++
++    root = Path(args.root)
++    load_info(root)
++    all_episode_ranges = load_episode_ranges(root)
++    requested_episode_indices = parse_int_ranges(args.episode_indices)
++    selected_ranges = select_episode_ranges(
++        all_episode_ranges,
++        episode_indices=requested_episode_indices,
++        episode_start=args.episode_start,
++        max_episodes=args.max_episodes,
++    )
++    if not selected_ranges:
++        raise ValueError("No episodes were selected. Check `--episode-indices`, `--episode-start`, and `--max-episodes`.")
++
++    frame_rows = load_frame_rows(root, selected_ranges)
++    rows = build_sidecar_rows_from_frame_rows(
++        frame_rows,
++        W1=args.w1,
++        W3=args.w3,
++        merge_window=args.merge_window,
++        labeler_version=args.labeler_version,
++    )
++    write_rows(rows, args.output)
++
++    summary = build_summary(rows, str(root), args.repo_id, selected_ranges)
++    maybe_write_summary(summary, args.summary_json)
++
++    print(json.dumps(summary, indent=2, sort_keys=True))
++    print(f"Wrote {len(rows)} rows to {args.output}")
++
++
++if __name__ == "__main__":
++    main()

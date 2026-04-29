@@ -73,7 +73,7 @@ RUN_NAME="smolvla_libero_multitask_$(date +%Y%m%d_%H%M%S)"
 #   --env.type=libero \
 #   --env.task="${TASKS}" \
 #   --output_dir=outputs/train/${RUN_NAME} \
-#   --job_name={RUN_NAME} \
+#   --job_name="${RUN_NAME}" \
 #   --eval.batch_size=1 \
 #   --eval.n_episodes=1 \
 #   --eval_freq=1000000
@@ -101,7 +101,7 @@ accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which 
   --env.type=libero \
   --env.task="${TASKS}" \
   --output_dir=outputs/train/${RUN_NAME} \
-  --job_name={RUN_NAME} \
+  --job_name="${RUN_NAME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
   --eval_freq=1000000

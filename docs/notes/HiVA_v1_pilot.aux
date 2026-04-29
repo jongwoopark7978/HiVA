@@ -1,0 +1,121 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand*\HyPL@Entry[1]{}
+\citation{act2023,diffusionpolicy2023,smolvla2025,vpp2024}
+\citation{aac2026,autohorizon2026}
+\citation{rtc2025,abpolicy2026}
+\citation{options1999,hiro2018,hac2019}
+\citation{qchunking2025}
+\citation{act2023,diffusionpolicy2023,aac2026,abpolicy2026}
+\citation{beast2025}
+\citation{abpolicy2026}
+\HyPL@Entry{0<</S/D>>}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Related Work}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Action chunking and adaptive execution horizons.}{1}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hierarchical RL and chunked action spaces.}{1}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Smooth and compact action representations.}{1}{section*.4}\protected@file@percent }
+\citation{smolvla2025,vpp2024,aac2026}
+\citation{smolvla2025,vpp2024}
+\citation{smolvla2025,vpp2024}
+\@writefile{toc}{\contentsline {paragraph}{Denoising-based VLA action experts.}{2}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Method}{2}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Overview}{2}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Macro-action parameterization}{2}{subsection.2.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Overview of HiVA. A regular action expert (AE) executes a fixed number of micro-actions for every model call. This fixed-horizon design can waste calls during easy free-space motion and still remain insufficiently reactive near the target object, causing overshoot and task failure. AE+HiVA instead predicts variable-horizon macro actions: longer horizons for easy sub-trajectories and shorter horizons for difficult, contact-sensitive manipulation. This lets the policy spend fewer calls on simple motion while increasing reactivity near the object, leading to successful long-horizon execution.}}{3}{figure.1}\protected@file@percent }
+\newlabel{fig:hiva-overview}{{1}{3}{Overview of HiVA. A regular action expert (AE) executes a fixed number of micro-actions for every model call. This fixed-horizon design can waste calls during easy free-space motion and still remain insufficiently reactive near the target object, causing overshoot and task failure. AE+HiVA instead predicts variable-horizon macro actions: longer horizons for easy sub-trajectories and shorter horizons for difficult, contact-sensitive manipulation. This lets the policy spend fewer calls on simple motion while increasing reactivity near the object, leading to successful long-horizon execution}{figure.1}{}}
+\newlabel{fig:hiva-overview@cref}{{[figure][1][]1}{[1][2][]3}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Joint duration reasoning with a denoising action expert}{3}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Compact training objective}{3}{subsection.2.4}\protected@file@percent }
+\newlabel{eq:total-loss-main}{{5}{3}{Compact training objective}{equation.2.5}{}}
+\newlabel{eq:total-loss-main@cref}{{[equation][5][]5}{[1][3][]3}}
+\citation{libero2023,liberoplus2025}
+\citation{calvin2021}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces HiVA architecture. HiVA replaces the fixed raw-action interface of a denoising VLA action expert with a macro-action interface. The action tokens are decomposed into duration, translation-coefficient, rotation-coefficient, and gripper tokens, allowing each macro action to capture both a behavioral segment and fine-grained control within that segment. The built-in action head is replaced by duration, coefficient, and gripper heads, and a B-spline basis converts the predicted coefficients and duration into smooth variable-length micro-actions.}}{4}{figure.2}\protected@file@percent }
+\newlabel{fig:hiva-architecture}{{2}{4}{HiVA architecture. HiVA replaces the fixed raw-action interface of a denoising VLA action expert with a macro-action interface. The action tokens are decomposed into duration, translation-coefficient, rotation-coefficient, and gripper tokens, allowing each macro action to capture both a behavioral segment and fine-grained control within that segment. The built-in action head is replaced by duration, coefficient, and gripper heads, and a B-spline basis converts the predicted coefficients and duration into smooth variable-length micro-actions}{figure.2}{}}
+\newlabel{fig:hiva-architecture@cref}{{[figure][2][]2}{[1][2][]4}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Training Dataset and Evaluation Benchmarks}{4}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Training dataset construction}{4}{subsection.3.1}\protected@file@percent }
+\newlabel{eq:segment-cost}{{6}{4}{Training dataset construction}{equation.3.6}{}}
+\newlabel{eq:segment-cost@cref}{{[equation][6][]6}{[1][4][]4}}
+\newlabel{eq:dp}{{14}{4}{Training dataset construction}{equation.3.14}{}}
+\newlabel{eq:dp@cref}{{[equation][14][]14}{[1][4][]4}}
+\citation{smolvla2025,vpp2024}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Benchmarks}{5}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Backbones and protocol}{5}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {A}Detailed Training Objective}{5}{appendix.A}\protected@file@percent }
+\newlabel{app:training-objective}{{A}{5}{Detailed Training Objective}{appendix.A}{}}
+\newlabel{app:training-objective@cref}{{[appendix][1][2147483647]A}{[1][5][]5}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}LIBERO-Plus cumulative rotation labels}{5}{subsection.A.1}\protected@file@percent }
+\newlabel{app:liberoplus-rotation}{{A.1}{5}{LIBERO-Plus cumulative rotation labels}{subsection.A.1}{}}
+\newlabel{app:liberoplus-rotation@cref}{{[subappendix][1][2147483647,1]A.1}{[1][5][]5}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}Duration loss}{5}{subsection.A.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}Soft duration-aware reconstruction}{5}{subsection.A.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.4}Continuous denoising objective for translation and rotation coefficients}{6}{subsection.A.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Flow-matching instantiation.}{6}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Diffusion instantiation.}{6}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.5}Gripper heads and reconstruction}{6}{subsection.A.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.6}Complete macro loss}{6}{subsection.A.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {B}Preliminary HiVA-Lite Experiments}{6}{appendix.B}\protected@file@percent }
+\newlabel{app:prelim-hiva-lite}{{B}{6}{Preliminary HiVA-Lite Experiments}{appendix.B}{}}
+\newlabel{app:prelim-hiva-lite@cref}{{[appendix][2][2147483647]B}{[1][6][]6}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.1}Experiment 1: duration-only SmolVLA}{6}{subsection.B.1}\protected@file@percent }
+\newlabel{app:exp-duration-only}{{B.1}{6}{Experiment 1: duration-only SmolVLA}{subsection.B.1}{}}
+\newlabel{app:exp-duration-only@cref}{{[subappendix][1][2147483647,2]B.1}{[1][6][]6}}
+\newlabel{eq:prelim-duration-loss}{{48}{7}{Experiment 1: duration-only SmolVLA}{equation.B.48}{}}
+\newlabel{eq:prelim-duration-loss@cref}{{[equation][48][2147483647]48}{[1][7][]7}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.2}Experiment 2: one-macro translation-coefficient HiVA-lite}{7}{subsection.B.2}\protected@file@percent }
+\newlabel{app:exp-one-macro-trans}{{B.2}{7}{Experiment 2: one-macro translation-coefficient HiVA-lite}{subsection.B.2}{}}
+\newlabel{app:exp-one-macro-trans@cref}{{[subappendix][2][2147483647,2]B.2}{[1][7][]7}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.3}Duration histograms and phase-conditioned statistics}{7}{subsection.B.3}\protected@file@percent }
+\newlabel{app:histograms}{{B.3}{7}{Duration histograms and phase-conditioned statistics}{subsection.B.3}{}}
+\newlabel{app:histograms@cref}{{[subappendix][3][2147483647,2]B.3}{[1][7][]7}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.4}Basis size, effective degree, and control points}{8}{subsection.B.4}\protected@file@percent }
+\newlabel{app:keff}{{B.4}{8}{Basis size, effective degree, and control points}{subsection.B.4}{}}
+\newlabel{app:keff@cref}{{[subappendix][4][2147483647,2]B.4}{[1][8][]8}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.5}Sidecar dataset format for duration-only HiVA-lite}{8}{subsection.B.5}\protected@file@percent }
+\newlabel{app:dataset-format}{{B.5}{8}{Sidecar dataset format for duration-only HiVA-lite}{subsection.B.5}{}}
+\newlabel{app:dataset-format@cref}{{[subappendix][5][2147483647,2]B.5}{[1][8][]8}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.6}Horizon-safe dense duration labels}{8}{subsection.B.6}\protected@file@percent }
+\newlabel{app:horizon-safe-labeling}{{B.6}{8}{Horizon-safe dense duration labels}{subsection.B.6}{}}
+\newlabel{app:horizon-safe-labeling@cref}{{[subappendix][6][2147483647,2]B.6}{[1][8][]8}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Sidecar fields and replay overlay names. The replay overlay currently displays \texttt  {TK}, \texttt  {D}, \texttt  {EPS}, \texttt  {FR}, \texttt  {Ds}, \texttt  {DTS}, \texttt  {CMS}, \texttt  {QPS}, \texttt  {Dp}, \texttt  {PCF}, and \texttt  {DTPC}.}}{9}{table.1}\protected@file@percent }
+\newlabel{tab:hiva-lite-sidecar-fields}{{1}{9}{Sidecar fields and replay overlay names. The replay overlay currently displays \texttt {TK}, \texttt {D}, \texttt {EPS}, \texttt {FR}, \texttt {Ds}, \texttt {DTS}, \texttt {CMS}, \texttt {QPS}, \texttt {Dp}, \texttt {PCF}, and \texttt {DTPC}}{table.1}{}}
+\newlabel{tab:hiva-lite-sidecar-fields@cref}{{[table][1][2147483647]1}{[1][8][]9}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.7}Pure-contact frame detection and replay metadata}{9}{subsection.B.7}\protected@file@percent }
+\newlabel{app:gripper-contact-speed-curv}{{B.7}{9}{Pure-contact frame detection and replay metadata}{subsection.B.7}{}}
+\newlabel{app:gripper-contact-speed-curv@cref}{{[subappendix][7][2147483647,2]B.7}{[1][9][]9}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {B.8}Gripper switch detection from LIBERO actions and qpos}{10}{subsection.B.8}\protected@file@percent }
+\newlabel{app:gripper-switch-code}{{B.8}{10}{Gripper switch detection from LIBERO actions and qpos}{subsection.B.8}{}}
+\newlabel{app:gripper-switch-code@cref}{{[subappendix][8][2147483647,2]B.8}{[1][10][]10}}
+\bibcite{aac2026}{{1}{}{{}}{{}}}
+\bibcite{autohorizon2026}{{2}{}{{}}{{}}}
+\bibcite{abpolicy2026}{{3}{}{{}}{{}}}
+\bibcite{beast2025}{{4}{}{{}}{{}}}
+\bibcite{smolvla2025}{{5}{}{{}}{{}}}
+\bibcite{vpp2024}{{6}{}{{}}{{}}}
+\bibcite{libero2023}{{7}{}{{}}{{}}}
+\bibcite{liberoplus2025}{{8}{}{{}}{{}}}
+\bibcite{calvin2021}{{9}{}{{}}{{}}}
+\bibcite{act2023}{{10}{}{{}}{{}}}
+\bibcite{diffusionpolicy2023}{{11}{}{{}}{{}}}
+\bibcite{rtc2025}{{12}{}{{}}{{}}}
+\bibcite{options1999}{{13}{}{{}}{{}}}
+\bibcite{hiro2018}{{14}{}{{}}{{}}}
+\bibcite{hac2019}{{15}{}{{}}{{}}}
+\bibcite{qchunking2025}{{16}{}{{}}{{}}}
+\providecommand\NAT@force@numbers{}\NAT@force@numbers
+\gdef \@abspage@last{12}

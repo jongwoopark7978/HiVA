@@ -167,3 +167,6 @@ class DurationSidecarDataset(torch.utils.data.Dataset):
         if row.get("duration_label") not in (None, ""):
             sample["duration_label"] = torch.tensor(int(row["duration_label"]), dtype=torch.long)
         return sample
+
+    def __getitems__(self, indices):
+        return [self[idx] for idx in indices]
