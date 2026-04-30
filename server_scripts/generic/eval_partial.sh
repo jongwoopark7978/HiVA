@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+
 LOG_DIR="outputs/eval_logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/eval_$(date +%Y%m%d_%H%M%S).log"

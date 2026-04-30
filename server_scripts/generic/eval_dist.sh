@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+
 # POLICY_PATH="/home/jongwoopark/lerobot/outputs/train/smolvla_libero_from_official_20260425_004040/checkpoints/last/pretrained_model"
 # POLICY_PATH="/home/jongwoopark/lerobot/outputs/train/smolvla_libero_multitask_20260425_165516/checkpoints/last/pretrained_model"
 POLICY_PATH="/home/jongwoopark/lerobot/outputs/train/smolvla_libero_from_official_20260425_160656/checkpoints/last/pretrained_model"

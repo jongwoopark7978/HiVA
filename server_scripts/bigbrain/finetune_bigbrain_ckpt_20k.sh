@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+
 LOG_DIR="outputs/train_logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/finetune_$(date +%Y%m%d_%H%M%S).log"
@@ -10,8 +14,8 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo "Logging to ${LOG_FILE}"
 
-# Smoke test on one GPU with enough free memory.
-export CUDA_VISIBLE_DEVICES=1
+# Use 4 GPUs
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 export MUJOCO_GL=egl
 
 # bigbrain
@@ -22,8 +26,6 @@ DATA_ROOT="/nfs/bigbrain/add_disk0/jongwoopark/libero_lerobot_v3_lerobotkeys"
 #DATA_ROOT="/nfs/bigquery.cs.stonybrook.edu/add_disk0/cristinam/libero/libero_lerobot_v3_lerobotkeys"
 DATA_REPO_ID="local/libero_lerobot_v3_lerobotkeys"
 TASKS="libero_spatial,libero_object,libero_goal,libero_10"
-PILOT_EPISODES="[2,8,13,14,382]"
-SIDECAR="/nfs/bigbrain/add_disk0/jongwoopark/libero_duration_sidecar_pilot_ep2_8_13_14_382.parquet"
 
 # Reuse your local downloaded checkpoint. If you prefer Hub loading, replace with:
 PRETRAINED="/home/jongwoopark/lerobot/smolvla_libero"
@@ -38,11 +40,11 @@ mkdir -p "${HF_DATASETS_CACHE}"
 # export HF_DATASETS_CACHE="/nfs/bigflow/add_disk0/jongwoopark/jongwoopark_hf_datasets_cache"
 # mkdir -p "${HF_DATASETS_CACHE}"
 
-RUN_NAME="smolvla_hiva_duration_token_smoke_$(date +%Y%m%d_%H%M%S)"
+RUN_NAME="smolvla_libero_from_official_$(date +%Y%m%d_%H%M%S)"
 
 # 20k recommended.
 # actual run with bs128
-accelerate launch --num_processes=1 --mixed_precision=bf16 "$(which lerobot-train)" \
+accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which lerobot-train)" \
   --policy.type=smolvla \
   --policy.pretrained_path="${PRETRAINED}" \
   --policy.expert_width_multiplier=0.5 \
@@ -51,24 +53,16 @@ accelerate launch --num_processes=1 --mixed_precision=bf16 "$(which lerobot-trai
   --policy.push_to_hub=false \
   --policy.train_expert_only=true \
   --policy.freeze_vision_encoder=true \
-  --policy.use_duration_head=true \
-  --policy.duration_loss_weight=0.1 \
-  --policy.duration_sidecar_path="${SIDECAR}" \
-  --batch_size=8 \
-  --steps=5 \
-  --log_freq=1 \
-  --save_checkpoint=true \
-  --save_freq=5 \
-  --num_workers=0 \
-  --policy.scheduler_warmup_steps=1 \
-  --policy.scheduler_decay_steps=5 \
+  --batch_size=192 \
+  --steps=1700 \
+  --policy.scheduler_warmup_steps=17 \
+  --policy.scheduler_decay_steps=1700 \
   --policy.scheduler_decay_lr=2.5e-6 \
   --policy.device=cuda \
   --policy.num_steps=10 \
-  --policy.n_action_steps=8 \
+  --policy.n_action_steps=1 \
   --dataset.repo_id="${DATA_REPO_ID}" \
   --dataset.root="${DATA_ROOT}" \
-  --dataset.episodes="${PILOT_EPISODES}" \
   --rename_map='{"observation.images.agentview":"observation.images.image","observation.images.wrist":"observation.images.image2"}' \
   --env.type=libero \
   --env.control_mode=relative \
@@ -77,7 +71,7 @@ accelerate launch --num_processes=1 --mixed_precision=bf16 "$(which lerobot-trai
   --job_name="${RUN_NAME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
-  --eval_freq=1000000
+  --eval_freq="${EVAL_FREQ:-0}" \
 
 
 
@@ -99,7 +93,7 @@ accelerate launch --num_processes=1 --mixed_precision=bf16 "$(which lerobot-trai
 #   --policy.scheduler_decay_lr=2.5e-6 \
 #   --policy.device=cuda \
 #   --policy.num_steps=10 \
-#   --policy.n_action_steps=8 \
+#   --policy.n_action_steps=1 \
 #   --dataset.repo_id="${DATA_REPO_ID}" \
 #   --dataset.root="${DATA_ROOT}" \
 #   --rename_map='{"observation.images.agentview":"observation.images.image","observation.images.wrist":"observation.images.image2"}' \
@@ -110,7 +104,7 @@ accelerate launch --num_processes=1 --mixed_precision=bf16 "$(which lerobot-trai
 #   --job_name="${RUN_NAME}" \
 #   --eval.batch_size=1 \
 #   --eval.n_episodes=1 \
-#   --eval_freq=1000000 \
+#   --eval_freq="${EVAL_FREQ:-0}" \
 
 # bs	mem  time
 # 128	63
@@ -118,3 +112,4 @@ accelerate launch --num_processes=1 --mixed_precision=bf16 "$(which lerobot-trai
 # 256   OOM
 # 320	OOM
 # 384	OOM
+

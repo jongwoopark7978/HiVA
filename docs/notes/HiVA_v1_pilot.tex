@@ -394,7 +394,7 @@ L_j =\;& \lambda_{\mathrm{dur}}L_{\mathrm{dur},j}
 This appendix records the simplified first experiments used before the full DP-based HiVA system. The goal is to produce an interpretable preliminary result on LIBERO with minimal changes to SmolVLA: the model learns when to execute short, medium, or long prefixes, while the original raw action chunk training path remains largely unchanged.
 
 
-\subsection{Experiment 1a: simple stable duration-query baseline}
+\subsection{Experiment 1: simple stable duration-query baseline}
 \label{app:exp-duration-only}
 The first duration-only baseline keeps SmolVLA's raw action representation and adds a learned neutral duration query to the action expert. The query is not a ground-truth duration-class token. That is, the same learned token $q_{\mathrm{dur}}$ is appended for every training example, and the duration label $d_s^{\star}$ is used only as a cross-entropy target. This avoids label leakage while allowing the duration query to read the action-token representation produced by the action expert.
 
@@ -456,7 +456,7 @@ and the controller executes only the first $\hat d_s$ actions before re-observin
 \end{equation}
 Thus $N$ remains the raw training and prediction chunk length, while $\hat d_s$ is the executed prefix length. This baseline is intentionally conservative: duration is learned from clean teacher-forced expert chunks during training and from the final denoised chunk during inference, without changing the normal action denoising trajectory.
 
-\subsection{Experiment 1b: clean-plus-noisy duration-query baseline}
+\subsubsection*{Clean-plus-noisy duration-query ablation}
 \label{app:exp-duration-clean-noisy}
 The second duration-only baseline keeps the same neutral duration query but also trains it during noisy action-denoising passes. This variant is motivated by the architecture of flow-matching VLAs such as $\pi_0$ and SmolVLA, where noisy action tokens are processed together with clean visual, language, and state context inside an action expert \cite{pi02024,smolvla2025}. However, the exact duration-query auxiliary objective below is an ablation proposed for HiVA-lite rather than a loss copied directly from those codebases.
 
@@ -680,26 +680,42 @@ The duration-only experiment in \cref{app:exp-duration-only} does not use $K$ di
 
 \subsection{Sidecar dataset format for duration-only HiVA-lite}
 \label{app:dataset-format}
-The original LeRobot/LIBERO dataset should remain unchanged. We store duration labels and diagnostics in a sidecar table, e.g., Parquet or JSONL for small-scale debugging. Each row corresponds to one dense training start $s_j$ and contains pointers back to the original episode and frame:
-\begin{center}
-\begin{tabular}{p{0.35\linewidth}p{0.55\linewidth}}
+The original LeRobot/LIBERO action trajectories remain unchanged. We store duration labels and diagnostics in a sidecar table, e.g., Parquet or JSONL for small-scale debugging. Each row corresponds to one dense training start $s_j$ and contains pointers back to the original episode and frame. The current implementation also supports a small dataset-level metadata file, \texttt{meta/purecontact\_pcf.json}, which stores verified pure-contact frame annotations. This metadata is read when building the sidecar; the expert action parquet files themselves are not rewritten.
+
+\begin{table*}[t]
+\centering
+\scriptsize
+\begin{tabular}{p{0.24\textwidth}p{0.12\textwidth}p{0.56\textwidth}}
 \toprule
-Field & Meaning \\
+Sidecar field & Replay name & Meaning \\
 \midrule
-\texttt{episode\_index} & source episode id \\
-\texttt{frame\_index} & start micro-action index $s_j$ \\
-\texttt{task\_index} & LIBERO task id \\
-\texttt{duration\_label} & actual duration value, e.g., $1,3,8$ \\
-\texttt{duration\_class} & CE class id, e.g., $1\mapsto0$, $3\mapsto1$, $8\mapsto2$ \\
-\texttt{phase} & pseudo-phase: free motion, near gripper, or other \\
-\texttt{near\_gripper} & whether the segment overlaps a gripper-event neighborhood \\
-\texttt{dist\_to\_switch} & distance to the nearest detected gripper switch \\
-\texttt{cmd\_switch} & switch detected from raw action command \\
-\texttt{qpos\_switch} & switch detected from gripper qpos hysteresis \\
-\texttt{labeler\_version} & relabeling rule/version identifier \\
+\texttt{dataset\_index} & -- & global row index in the original LeRobot dataset \\
+\texttt{episode\_index} & \texttt{EPS} & source episode id \\
+\texttt{frame\_index} & \texttt{FR} & start micro-action index $s_j$ \\
+\texttt{task\_index} & -- & LIBERO dataset task id \\
+\texttt{libero\_task\_language} & \texttt{TK} & language instruction displayed in the replay overlay \\
+\texttt{duration\_label} & \texttt{D} & final duration target $d_s^{\star}=\min(d_s^S,d_s^P)$, with values in $\{1,3,8\}$ \\
+\texttt{duration\_class} & -- & CE class id, e.g., $1\mapsto0$, $3\mapsto1$, $8\mapsto2$ \\
+\texttt{duration\_label\_s} & \texttt{Ds} & duration from explicit gripper open/close switch zones only \\
+\texttt{duration\_label\_p} & \texttt{Dp} & duration from pure-contact frame (PCF) zones only \\
+\texttt{phase} & -- & pseudo-phase: \texttt{near\_target}, \texttt{approach}, or \texttt{free\_motion} \\
+\texttt{dist\_to\_switch} & \texttt{DTS} & distance to the nearest valid gripper switch zone endpoint \\
+\texttt{cmd\_switch} & \texttt{CMS} & command-side switch frame from the raw gripper action \\
+\texttt{qpos\_switch} & \texttt{QPS} & physical switch frame from gripper qpos hysteresis \\
+\texttt{pcf\_frame} & \texttt{PCF} & saved pure-contact frame for this episode, or $-1$ if absent \\
+\texttt{is\_pcf} & -- & whether \texttt{frame\_index} equals the saved PCF \\
+\texttt{dist\_to\_pure\_contact} & \texttt{DTPC} & distance to the nearest saved PCF \\
+\texttt{inside\_purecontact\_zone} & -- & whether the frame lies inside the PCF horizon-safe zone \\
+\texttt{purecontact\_case\_category} & -- & language-derived PCF case, e.g., \texttt{case1} or \texttt{case2} \\
+\texttt{purecontact\_keyword} & -- & target object keyword used by the PCF language filter \\
+\texttt{purecontact\_verb} & -- & manipulation verb used by the PCF language filter \\
+\texttt{labeler\_version} & -- & relabeling rule/version identifier \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Sidecar fields and replay overlay names. The replay overlay currently displays \texttt{TK}, \texttt{D}, \texttt{EPS}, \texttt{FR}, \texttt{Ds}, \texttt{DTS}, \texttt{CMS}, \texttt{QPS}, \texttt{Dp}, \texttt{PCF}, and \texttt{DTPC}.}
+\label{tab:hiva-lite-sidecar-fields}
+\end{table*}
+
 The training sample returned by the dataset wrapper is
 \begin{equation}
 (o_{s_j},\ell,A^{\star}_{s_j:s_j+N-1},d_j^{\star}),
@@ -708,30 +724,60 @@ where $A^{\star}_{s_j:s_j+N-1}$ is the standard $N$-step SmolVLA action target. 
 
 \subsection{Horizon-safe dense duration labels}
 \label{app:horizon-safe-labeling}
-We train the duration-only model with an overlapping dense dataset: every eligible micro-action index $s$ can become a training start. The label is assigned by a horizon-safe rule rather than by a non-overlapping macro segmentation. For neighboring gripper events $e_i\le s<e_{i+1}$, define the near-gripper zone and center/free region
+We train the duration-only model with an overlapping dense dataset: every eligible micro-action index $s$ can become a training start. The label is assigned by a horizon-safe rule rather than by a non-overlapping macro segmentation. The current labeler applies the same rule to two kinds of interaction landmarks: explicit gripper open/close switch zones, derived from \texttt{CMS} and \texttt{QPS}; and pure-contact frame zones, derived from saved PCF annotations for contact without gripper open/close. The final label is the more conservative of the two labels.
+
+Let $\mathcal{Z}=\{z_k\}_{k=1}^{K}$ be either the switch-zone set or the PCF-zone set. Each zone is an interval $z_k=[b_k,e_k]$. For explicit switches, $b_k=\min(c_k,q_k)$ and $e_k=\max(c_k,q_k)$, where $c_k$ is the \texttt{CMS} frame and $q_k$ is the \texttt{QPS} frame. For a PCF, the zone is a singleton, $b_k=e_k=p_k$. A frame inside any zone is always assigned duration 1. Otherwise, let $e_{\mathcal{Z}}^{-}(s)$ be the end of the previous zone, if one exists, and let $b_{\mathcal{Z}}^{+}(s)$ be the start of the next zone, if one exists. The beginning and ending of the trajectory are not treated as artificial switch zones. Thus, if no previous or next true interaction zone exists, the corresponding side is left open.
+
+For a frame between two true neighboring zones, define the left and right near-target regions
 \begin{equation}
-\mathcal{N}_i=
-[e_i,\;e_i+W_1)\;\cup\;[e_{i+1}-W_1,\;e_{i+1}),
+\mathcal{N}_{\mathcal{Z}}^{-}
+= \{s:e_{\mathcal{Z}}^{-}(s)\le s<e_{\mathcal{Z}}^{-}(s)+W_1\},
+\qquad
+\mathcal{N}_{\mathcal{Z}}^{+}
+= \{s:b_{\mathcal{Z}}^{+}(s)-W_1\le s<b_{\mathcal{Z}}^{+}(s)\},
 \end{equation}
+with $\mathcal{N}_{\mathcal{Z}}=\mathcal{N}_{\mathcal{Z}}^{-}\cup\mathcal{N}_{\mathcal{Z}}^{+}$. The center/free region is
 \begin{equation}
-\mathcal{C}_i=
-[e_i+W_1+W_3,\;e_{i+1}-W_1-W_3).
+\mathcal{C}_{\mathcal{Z}}
+=
+[e_{\mathcal{Z}}^{-}+W_1+W_3,\;b_{\mathcal{Z}}^{+}-W_1-W_3).
 \end{equation}
-For $\mathcal{D}=\{1,3,8\}$, we say that duration $d$ is horizon-safe at start $s$ when
+In the implementation we use $\mathcal{D}=\{1,3,8\}$, $W_1=15$, and $W_3=15$. To keep the rule compact, define
+\begin{align}
+R_3(s;\mathcal{Z}) &=
+[s\notin\mathcal{N}_{\mathcal{Z}}]\wedge B_3(s;\mathcal{Z}),\\
+R_8(s;\mathcal{Z}) &=
+[s\in\mathcal{C}_{\mathcal{Z}}]\wedge B_8(s;\mathcal{Z}),
+\end{align}
+where
+\begin{align}
+B_3(s;\mathcal{Z}) &=
+[b_{\mathcal{Z}}^{+}\ \text{absent}]\vee[s+3\le b_{\mathcal{Z}}^{+}-W_1],\\
+B_8(s;\mathcal{Z}) &=
+[b_{\mathcal{Z}}^{+}\ \text{absent}]\vee[s+8\le b_{\mathcal{Z}}^{+}-W_1].
+\end{align}
+A candidate duration $d$ is horizon-safe at start $s$ when
 \begin{equation}
-\operatorname{valid}_i(s,d)=
+\operatorname{valid}_{\mathcal{Z}}(s,d)=
 \begin{cases}
 1, & d=1,\\[2mm]
-\mathbf{1}[s\notin \mathcal{N}_i\ \wedge\ s+3\le e_{i+1}-W_1], & d=3,\\[2mm]
-\mathbf{1}[s\in \mathcal{C}_i\ \wedge\ s+8\le e_{i+1}-W_1], & d=8.
+\mathbf{1}[R_3(s;\mathcal{Z})], & d=3,\\[2mm]
+\mathbf{1}[R_8(s;\mathcal{Z})], & d=8.
 \end{cases}
 \end{equation}
-The dense duration label is then
+Let $V_{\mathcal{Z}}(s)=\{d\in\mathcal{D}:\operatorname{valid}_{\mathcal{Z}}(s,d)=1\}$. The zone-specific label is
 \begin{equation}
-d_s^{\star}=
-\max\{d\in\{1,3,8\}:\operatorname{valid}_i(s,d)=1\}.
+d_{\mathcal{Z}}(s)=
+\begin{cases}
+1, & s\in\cup_k z_k,\\
+\max V_{\mathcal{Z}}(s), & \text{otherwise}.
+\end{cases}
 \end{equation}
-Equivalently, $d_s^{\star}$ is the longest candidate horizon whose executed segment $[s,s+d)$ avoids violating the phase rule: use $d=1$ in the near-gripper zone, use $d=8$ only in the center/free region, and otherwise use $d=3$ when it can end before the final near-gripper zone. This produces overlapping samples such as
+We compute $d_s^S$ from the gripper switch zones and $d_s^P$ from the saved PCF zones. If an episode has no PCF annotation, $d_s^P=8$ for all $s$, so the PCF rule is inactive. The final dense duration label is
+\begin{equation}
+d_s^{\star}=\min(d_s^S,d_s^P).
+\end{equation}
+This produces overlapping samples such as
 \begin{equation}
 (o_s,\ell,A^{\star}_{s:s+N-1},d_s^{\star}),
 \quad
@@ -739,50 +785,43 @@ Equivalently, $d_s^{\star}$ is the longest candidate horizon whose executed segm
 \end{equation}
 while preserving the distinction between the training chunk length $N$ and the executed duration $d_s^{\star}$. During inference, the model predicts $N$ actions but executes only $\hat d_s\in\{1,3,8\}$ before re-observing.
 
-\subsection{Gripper contact-region detection from speed and curvature}
+\subsection{Pure-contact frame detection and replay metadata}
+\label{app:purecontact-pcf}
 \label{app:gripper-contact-speed-curv}
-Not every contact-rich manipulation phase is marked by an explicit gripper open/close switch. For example, during pushing, sliding, or careful handle approach, the gripper state may stay unchanged even though the end effector enters a delicate interaction regime. To capture such phases, we define an additional contact-region timestamp sequence $t_{\mathrm{gripper}}^{\mathrm{contact}}$ using the local speed and curvature of the end-effector trajectory. This contact-region signal is separate from the switch-time signal $t_{\mathrm{gripper}}^{\mathrm{switch}}$ obtained from gripper actions and qpos in \cref{app:gripper-switch-code}.
+Not every contact-rich manipulation phase is marked by an explicit gripper open/close switch. In LIBERO drawer and microwave tasks, the gripper may hook, push, or drag the target handle while the gripper command remains nearly constant. We therefore replace the earlier speed/curvature heuristic with a simulator-verified pure-contact frame (PCF) label. PCF is used only for relabeling and diagnostics; the expert action trajectory remains the original dataset trajectory.
 
-We compute the signal on the chunk-relative cumulative end-effector translation trajectory rather than on raw controller deltas. Let $p_u$ denote the cumulative end-effector translation at local micro-step $u$ inside a trajectory window. Define the local speed and curvature proxies
-\begin{equation}
- v_u = \lVert p_u - p_{u-1} \rVert_2,
- \qquad
- k_u = \lVert p_{u+1} - 2p_u + p_{u-1} \rVert_2.
-\end{equation}
-Here, $v_u$ becomes small when the arm slows down near contact, while $k_u$ becomes large when the local motion direction or acceleration changes sharply, e.g., at braking, alignment, bounce, or the onset of constrained motion.
+We first select candidate tasks from \texttt{libero\_task\_language}. The current filters use pure-contact keywords \{\texttt{drawer}, \texttt{microwave}\} and verbs \{\texttt{open}, \texttt{close}, \texttt{pull}\}. We further divide candidates into two language cases. \texttt{case1} means the task first interacts with another object and then manipulates the target fixture, e.g., ``put the mug in the microwave and close it.'' \texttt{case2} means the target fixture is manipulated first, e.g., ``open the drawer and put the bowl inside.'' This distinction matters because \texttt{case1} often contains earlier incidental contacts before the intended fixture manipulation.
 
-We combine these two cues into a per-step contact score
+When PCF metadata must be refreshed, we replay the expert actions from the episode's recorded LIBERO initial state and inspect MuJoCo contacts at each frame. A frame $t$ is a PCF candidate if a gripper, finger, or palm geometry contacts the target drawer or microwave handle/door geometry. We then require that this contact be followed by sustained target joint motion. With window $H=10$, movement threshold $\eta=0.03$, and same-sign count $K=10$, define
 \begin{equation}
- r_u^{\mathrm{contact}}
- = \lambda_k \frac{k_u}{\bar{k}+\epsilon}
- + \lambda_v \exp\!\left(-\frac{v_u}{\sigma_v}\right),
+\Delta_t=\max_{1\le h\le H}\left\lVert q^{\mathrm{target}}_{t+h}-q^{\mathrm{target}}_t\right\rVert_1,
 \end{equation}
-where $\bar{k}$ is a normalization constant such as the mean curvature in the current trajectory, $\epsilon>0$ avoids division by zero, and $\sigma_v$ controls how strongly very small speeds are emphasized. Intuitively, a step is contact-rich when the arm is either sharply adjusting, moving unusually slowly, or both.
+and let $n_t^{\mathrm{sign}}$ be the larger of the positive and negative same-sign velocity counts in the next $H$ target-joint velocity samples. The verified PCF onset is the first frame satisfying
+\begin{equation}
+\operatorname{contact}_t=1,
+\qquad
+\Delta_t\ge\eta,
+\qquad
+n_t^{\mathrm{sign}}\ge K,
+\end{equation}
+together with the task-phase gates implied by the language case. For \texttt{case1} close/open/pull tasks, the implementation additionally waits until the object-placement or release phase by requiring the gripper action not to be a close command at the candidate frame. The optional horizontal-motion gate is disabled by default because drawer and microwave manipulation should not be filtered by vertical motion. The resulting metadata stores the onset \texttt{pcf}, the consecutive contact interval, the case category, keyword, verb, and detection method in \texttt{meta/purecontact\_pcf.json}.
 
-Because contact often persists for a few steps after its onset, we inflate the score over a short temporal window:
-\begin{equation}
- \tilde{r}_u^{\mathrm{contact}}
- = \max_{v \le u}
- r_v^{\mathrm{contact}}
- \exp\!\left(-\frac{u-v}{\tau_c}\right),
-\end{equation}
-where $\tau_c$ controls how long the inflated contact cue remains active. We then declare a gripper-contact timestamp whenever the inflated score exceeds a threshold $\eta_c$:
-\begin{equation}
- t_{\mathrm{gripper}}^{\mathrm{contact}}
- = \{u : \tilde{r}_u^{\mathrm{contact}} > \eta_c\}.
-\end{equation}
-In practice, this produces a set of contact-region timestamps that can be merged with or used alongside the binary gripper switch timestamps. The switch-time logic is still useful for explicit open/close events, while the speed+curvature signal adds contact-rich phases that do not involve a gripper toggle.
+Normal replay generation and sidecar construction now use this saved PCF metadata. MuJoCo contact detection is rerun only when the metadata file itself needs to be updated. Thus, the fast replay path uses the saved \texttt{pcf} frame and original expert actions, while the slow update path recomputes contacts and rewrites \texttt{meta/purecontact\_pcf.json}.
 
 \subsection{Gripper switch detection from LIBERO actions and qpos}
 \label{app:gripper-switch-code}
-We detect gripper events using two complementary signals. The first is the raw LIBERO gripper command $a_t[-1]$. The code below assumes the native convention $a_t[-1]<0$ means an open command and $a_t[-1]>0$ means a close command; this convention should be verified once on the loaded dataset. The second signal is the gripper qpos pair stored in \texttt{state[-2:]}. We convert the two finger qpos values to a scalar width and apply hysteresis with two thresholds. In the ambiguous middle region, the previous state is held, avoiding repeated false open/close switches caused by small fluctuations.
+We detect explicit gripper events using two complementary signals. The first is the raw LIBERO gripper command $a_t[-1]$, where $a_t[-1]<0$ is an open command and $a_t[-1]>0$ is a close command. This yields the command-side switch sequence \texttt{CMS}. The second is the gripper qpos pair stored in \texttt{state[-2:]}. We convert the two finger qpos values to a scalar width and apply hysteresis, producing the physical qpos-side switch sequence \texttt{QPS}.
+
+The current implementation is more conservative than the initial pilot version. Same-type switches are merged with \texttt{merge\_window=3}. \texttt{CMS} and \texttt{QPS} are then paired monotonically with the constraint \texttt{CMS <= QPS} and an absolute match window. Unpaired singletons are recovered rather than discarded: if \texttt{CMS} is present but \texttt{QPS} is absent, the \texttt{QPS} frame is chosen as the later frame whose measured gripper width is closest to the relevant hysteresis threshold; if \texttt{QPS} is present but \texttt{CMS} is absent, the \texttt{CMS} frame is synthesized three frames earlier. These recovered pairs define switch zones used by the horizon-safe duration rule.
 
 \begin{lstlisting}[language=Python]
 import numpy as np
 
 DURATIONS = (1, 3, 8)
-W1 = 4   # near-gripper zone in frames
-W3 = 6   # transition zone in frames
+W1 = 15
+W3 = 15
+MERGE_WINDOW = 3
+MATCH_WINDOW = 20
 
 
 def switch_times(binary_state):
@@ -835,6 +874,8 @@ def open_state_from_qpos_hysteresis(state, low_pct=10, high_pct=90,
 
     q_closed_thr = q_low + alpha_closed * (q_high - q_low)
     q_open_thr = q_low + alpha_open * (q_high - q_low)
+    q_closed_thr = max(0.032, max(0.030, min(0.035, q_closed_thr)))
+    q_open_thr = max(0.036, max(0.035, min(0.040, q_open_thr)))
 
     open_state = np.zeros(len(q_width), dtype=np.int64)
     midpoint = 0.5 * (q_low + q_high)
@@ -852,90 +893,85 @@ def open_state_from_qpos_hysteresis(state, low_pct=10, high_pct=90,
     return open_state, q_width, thresholds
 
 
-def merge_close_events(events, merge_window=3):
+def merge_same_type_switches(events, merge_window=MERGE_WINDOW):
     events = np.array(sorted(set(map(int, events))), dtype=np.int64)
     if len(events) == 0:
         return events
-    merged = [events[0]]
+    merged = [int(events[0])]
+    cluster_last = int(events[0])
     for e in events[1:]:
-        if e - merged[-1] > merge_window:
-            merged.append(e)
+        e = int(e)
+        if e - cluster_last <= merge_window:
+            cluster_last = e
+            continue
+        merged.append(e)
+        cluster_last = e
     return np.array(merged, dtype=np.int64)
 
 
-def find_neighbor_events(s, events, T):
-    prev_events = events[events <= s]
-    next_events = events[events > s]
-    prev_e = int(prev_events[-1]) if len(prev_events) else 0
-    next_e = int(next_events[0]) if len(next_events) else T
-    return prev_e, next_e
+def pair_switches_monotonic(cmd_switches, qpos_switches,
+                            match_window=MATCH_WINDOW):
+    # Dynamic-programming one-to-one matching. Maximize the number of pairs,
+    # then minimize total |CMS-QPS|. Only CMS <= QPS pairs are valid.
+    ...
 
 
-def violates_phase_rule(s, d, prev_e, next_e, W1=4, W3=6):
-    """
-    Returns True if executing duration d from start s violates the
-    horizon-safe phase rule between neighboring events prev_e and next_e.
-    """
-    near_zone = (s - prev_e < W1) or (next_e - s <= W1)
-
-    if d == 1:
-        return False
-
-    if d == 3:
-        # Medium duration is allowed outside the near-gripper zone,
-        # as long as the executed horizon does not enter the final
-        # W1-frame near-gripper suffix.
-        return near_zone or (s + 3 > next_e - W1)
-
-    if d == 8:
-        # Long duration is allowed only in the center/free region, and
-        # its horizon must end before the final near-gripper suffix.
-        center_start = prev_e + W1 + W3
-        return not ((s >= center_start) and (s + 8 <= next_e - W1))
-
-    raise ValueError(f"Unsupported duration: {d}")
+def recover_singleton_switch_zones(zones, unmatched_cmd, unmatched_qpos,
+                                   close_cmd, q_width, q_thresholds, T):
+    # CMS without QPS: choose a later qpos frame closest to the target
+    # hysteresis threshold. QPS without CMS: synthesize CMS at QPS-3.
+    ...
 
 
-def horizon_safe_duration_label(s, events, T, durations=DURATIONS, W1=4, W3=6):
-    prev_e, next_e = find_neighbor_events(s, events, T)
-
+def horizon_safe_duration_label(s, context, W1=W1, W3=W3):
+    if context.inside_zone:
+        return 1
     valid = [
-        d for d in durations
-        if not violates_phase_rule(s, d, prev_e, next_e, W1=W1, W3=W3)
+        d for d in DURATIONS
+        if not violates_phase_rule(
+            s, d,
+            prev_e=context.prev_switch_end,
+            next_e=context.next_switch_start,
+            has_prev_zone=context.has_prev_zone,
+            has_next_zone=context.has_next_zone,
+            W1=W1,
+            W3=W3,
+        )
     ]
-    return max(valid) if len(valid) > 0 else 1
+    return max(valid) if valid else 1
 
 
-def detect_events_and_labels(actions, state):
+def detect_switch_labels(actions, state):
     T = len(actions)
 
     close_cmd = command_state_from_libero_action(actions)
-    cmd_switches = switch_times(close_cmd)
+    cmd_switches = merge_same_type_switches(switch_times(close_cmd))
 
     open_qpos, q_width, q_thresholds = open_state_from_qpos_hysteresis(state)
-    qpos_switches = switch_times(open_qpos)
+    qpos_switches = merge_same_type_switches(switch_times(open_qpos))
 
-    # Conservative option: use the union of command and physical qpos switches.
-    events = merge_close_events(np.concatenate([cmd_switches, qpos_switches]))
+    zones, unmatched_cmd, unmatched_qpos = pair_switches_monotonic(
+        cmd_switches, qpos_switches
+    )
+    zones, unmatched_cmd, unmatched_qpos = recover_singleton_switch_zones(
+        zones, unmatched_cmd, unmatched_qpos,
+        close_cmd=close_cmd, q_width=q_width,
+        q_thresholds=q_thresholds, T=T,
+    )
 
-    duration_labels = np.array([
-        horizon_safe_duration_label(s, events, T, W1=W1, W3=W3)
+    contexts = [frame_context_for_time(s, zones, T) for s in range(T)]
+    duration_s = np.array([
+        horizon_safe_duration_label(s, contexts[s], W1=W1, W3=W3)
         for s in range(T)
     ], dtype=np.int64)
 
-    duration_to_class = {1: 0, 3: 1, 8: 2}
-    duration_classes = np.array([
-        duration_to_class[int(d)] for d in duration_labels
-    ], dtype=np.int64)
-
     return {
-        "events": events,
+        "switch_zones": zones,
         "cmd_switches": cmd_switches,
         "qpos_switches": qpos_switches,
         "q_width": q_width,
         "q_thresholds": q_thresholds,
-        "duration_labels": duration_labels,
-        "duration_classes": duration_classes,
+        "duration_s": duration_s,
     }
 \end{lstlisting}
 

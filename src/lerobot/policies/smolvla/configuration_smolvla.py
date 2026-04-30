@@ -81,6 +81,8 @@ class SmolVLAConfig(PreTrainedConfig):
     duration_classes: tuple[int, ...] = (1, 3, 8)
     duration_loss_weight: float = 0.1
     duration_sidecar_path: str | None = None
+    # During duration training, reuse one prefix/VLM KV cache for noisy-action and clean-action expert passes.
+    duration_train_reuse_prefix_cache: bool = True
 
     # Training presets
     optimizer_lr: float = 1e-4

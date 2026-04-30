@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+
 LOG_DIR="outputs/train_logs"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/finetune_$(date +%Y%m%d_%H%M%S).log"
@@ -76,7 +80,7 @@ RUN_NAME="smolvla_libero_multitask_$(date +%Y%m%d_%H%M%S)"
 #   --job_name="${RUN_NAME}" \
 #   --eval.batch_size=1 \
 #   --eval.n_episodes=1 \
-#   --eval_freq=1000000
+#   --eval_freq="${EVAL_FREQ:-0}"
 
 
 
@@ -104,7 +108,7 @@ accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which 
   --job_name="${RUN_NAME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
-  --eval_freq=1000000
+  --eval_freq="${EVAL_FREQ:-0}"
 
 
 # 20k recommended.
@@ -133,7 +137,7 @@ accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which 
 #   --job_name=${RUN_NAME} \
 #   --eval.batch_size=1 \
 #   --eval.n_episodes=1 \
-#   --eval_freq=1000000
+#   --eval_freq="${EVAL_FREQ:-0}"
 
 
 

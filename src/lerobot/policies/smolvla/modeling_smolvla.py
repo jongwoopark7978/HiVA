@@ -924,6 +924,48 @@ class VLAFlowMatching(nn.Module):
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
         return embs, pad_masks, att_masks
 
+    def _forward_duration_training_with_prefix_cache(
+        self,
+        prefix_embs,
+        prefix_pad_masks,
+        prefix_att_masks,
+        actions,
+        time,
+        x_t,
+        u_t,
+    ):
+        # The prefix image/language/state path is identical for noisy and clean action suffixes.
+        # Cache it once, then run the action expert twice against the same prefix KV cache.
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        _, past_key_values = self.vlm_with_expert.forward(
+            attention_mask=prefix_att_2d_masks,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+            fill_kv_cache=True,
+        )
+
+        v_t = self.denoise_step(
+            prefix_pad_masks=prefix_pad_masks,
+            past_key_values=past_key_values,
+            x_t=x_t,
+            timestep=time,
+            use_cache=True,
+        )
+        losses = F.mse_loss(u_t, v_t, reduction="none")
+
+        clean_time = torch.zeros(actions.shape[0], dtype=torch.float32, device=actions.device)
+        duration_logits = self.predict_duration_logits(
+            prefix_pad_masks=prefix_pad_masks,
+            past_key_values=past_key_values,
+            x_t=actions,
+            timestep=clean_time,
+            use_cache=True,
+        )
+        return losses, duration_logits
+
     def forward(
         self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
     ) -> Tensor:
@@ -940,6 +982,17 @@ class VLAFlowMatching(nn.Module):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks, state=state
         )
+        if self.config.use_duration_head and self.config.duration_train_reuse_prefix_cache:
+            return self._forward_duration_training_with_prefix_cache(
+                prefix_embs=prefix_embs,
+                prefix_pad_masks=prefix_pad_masks,
+                prefix_att_masks=prefix_att_masks,
+                actions=actions,
+                time=time,
+                x_t=x_t,
+                u_t=u_t,
+            )
+
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, time)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
@@ -1065,8 +1118,9 @@ class VLAFlowMatching(nn.Module):
 
         return x_t
 
-    def predict_duration_logits(self, prefix_pad_masks, past_key_values, x_t, timestep):
+    def predict_duration_logits(self, prefix_pad_masks, past_key_values, x_t, timestep, use_cache=None):
         """Predict duration from the clean final action chunk plus the learned duration token."""
+        use_cache = self.config.use_cache if use_cache is None else use_cache
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep)
 
         suffix_len = suffix_pad_masks.shape[1]
@@ -1084,7 +1138,7 @@ class VLAFlowMatching(nn.Module):
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
-            use_cache=self.config.use_cache,
+            use_cache=use_cache,
             fill_kv_cache=False,
         )
         suffix_out = outputs_embeds[1]
@@ -1096,8 +1150,10 @@ class VLAFlowMatching(nn.Module):
         past_key_values,
         x_t,
         timestep,
+        use_cache=None,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
+        use_cache = self.config.use_cache if use_cache is None else use_cache
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep)
 
         suffix_len = suffix_pad_masks.shape[1]
@@ -1116,7 +1172,7 @@ class VLAFlowMatching(nn.Module):
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=[None, suffix_embs],
-            use_cache=self.config.use_cache,
+            use_cache=use_cache,
             fill_kv_cache=False,
         )
         suffix_out = outputs_embeds[1]
