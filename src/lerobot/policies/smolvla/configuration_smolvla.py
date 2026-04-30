@@ -80,6 +80,11 @@ class SmolVLAConfig(PreTrainedConfig):
     use_duration_head: bool = False
     duration_classes: tuple[int, ...] = (1, 3, 8)
     duration_loss_weight: float = 0.1
+    # Legacy clean-only runs use `duration_loss_weight`. Set this field to a non-negative
+    # value to override the clean duration coefficient explicitly.
+    duration_clean_loss_weight: float = -1.0
+    duration_noisy_loss_weight: float = 0.0
+    duration_noisy_sigma: float = 0.25
     duration_sidecar_path: str | None = None
     # During duration training, reuse one prefix/VLM KV cache for noisy-action and clean-action expert passes.
     duration_train_reuse_prefix_cache: bool = True
@@ -153,6 +158,14 @@ class SmolVLAConfig(PreTrainedConfig):
                 )
             if self.duration_loss_weight < 0:
                 raise ValueError("`duration_loss_weight` must be non-negative.")
+            if self.duration_clean_loss_weight < 0 and self.duration_clean_loss_weight != -1.0:
+                raise ValueError(
+                    "`duration_clean_loss_weight` must be non-negative, or -1 to use `duration_loss_weight`."
+                )
+            if self.duration_noisy_loss_weight < 0:
+                raise ValueError("`duration_noisy_loss_weight` must be non-negative.")
+            if self.duration_noisy_sigma <= 0:
+                raise ValueError("`duration_noisy_sigma` must be positive.")
 
     def validate_features(self) -> None:
         for i in range(self.empty_cameras):

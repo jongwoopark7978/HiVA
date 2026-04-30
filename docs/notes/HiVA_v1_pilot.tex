@@ -486,7 +486,7 @@ where the time-dependent weight emphasizes near-clean inputs:
 \begin{equation}
 w(t)=\exp\left(-\frac{t^2}{\sigma^2}\right).
 \end{equation}
-A practical starting range is $\sigma\in[0.25,0.4]$. The weighting is important because duration labels should be predicted most confidently when the action representation is close to the final denoised action chunk; at very high noise, forcing a strong duration decision may encourage the query to ignore the action tokens and rely only on the observation prior.
+For this ablation we use $\sigma=0.25$. The weighting is important because duration labels should be predicted most confidently when the action representation is close to the final denoised action chunk; at very high noise, forcing a strong duration decision may encourage the query to ignore the action tokens and rely only on the observation prior.
 
 The clean-plus-noisy objective is
 \begin{equation}
@@ -503,16 +503,16 @@ The clean loss anchors the duration head at the exact teacher-forced endpoint $t
 
 Training proceeds as follows. First, the normal SmolVLA flow-matching branch samples $t$ and $\epsilon$, constructs $A_s^t$, and computes $L_{\mathrm{FM-action}}$. Second, the model appends $q_{\mathrm{dur}}$ to the same noisy suffix and computes the weighted noisy duration cross-entropy in \cref{eq:prelim-duration-noisy-loss}. Third, it performs an additional clean $t=0$ teacher-forced duration pass using $A_s^{\star}$ to compute $L_{\mathrm{dur-clean}}$. The duration query remains a neutral learned query in both passes; the ground-truth duration class is never embedded as an input token.
 
-At inference, the query is appended throughout the denoising process. The action tokens are updated by the normal flow-matching solver, while the duration query is used only to produce duration logits. For a stable final prediction, we use the final denoised chunk and optionally average duration logits over the last few near-clean denoising evaluations:
+At inference, the query is appended throughout the denoising process. The action tokens are updated by the normal flow-matching solver, while the duration query is used only to produce duration logits. To keep the implementation identical to the simple stable baseline at decision time, we use the final denoised chunk and evaluate the duration query once at the clean endpoint $t=0$, rather than averaging duration logits over the last few near-clean denoising evaluations:
 \begin{equation}
-\bar z_s^{\mathrm{dur}}
+z_s^{\mathrm{dur}}
 =
-\frac{1}{K}\sum_{k=1}^{K} z_s^{\mathrm{dur}}(t_k),
-\qquad t_k\approx 0.
+W_{\mathrm{dur}}h_{\mathrm{dur}}
+\left(\hat A_s,q_{\mathrm{dur}},t=0,o_s,\ell\right).
 \end{equation}
 The executed horizon is then
 \begin{equation}
-\hat d_s=\arg\max_{d\in\mathcal{D}}\operatorname{softmax}(\bar z_s^{\mathrm{dur}})_d,
+\hat d_s=\arg\max_{d\in\mathcal{D}}\operatorname{softmax}(z_s^{\mathrm{dur}})_d,
 \end{equation}
 and only the first $\hat d_s$ actions from the generated raw chunk are executed before the next observation. This advanced baseline gives the duration query access to the action denoising trajectory, while the small coefficient $0.01$ on $L_{\mathrm{dur-noisy}}$ limits the risk of disturbing the original action-generation objective.
 

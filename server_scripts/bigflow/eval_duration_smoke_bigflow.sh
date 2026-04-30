@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-POLICY_PATH="/home/jongwoopark/lerobot/outputs/train/smolvla_hiva_duration_token_bigflow_smoke_20260429_190734/checkpoints/last/pretrained_model"
+POLICY_PATH="${POLICY_PATH:-/home/jongwoopark/lerobot/outputs/train/smolvla_hiva_duration_token_bigflow_smoke_20260429_190734/checkpoints/last/pretrained_model}"
 
 LOG_DIR="${REPO_ROOT}/outputs/eval_logs"
 mkdir -p "${LOG_DIR}"

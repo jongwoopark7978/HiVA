@@ -417,10 +417,10 @@ class SmolVLAPolicy(PreTrainedPolicy):
         loss_dict = {}
         model_output = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
         if self.config.use_duration_head:
-            losses, duration_logits = model_output
+            losses, duration_output = model_output
         else:
             losses = model_output
-            duration_logits = None
+            duration_output = None
         original_action_dim = self.config.action_feature.shape[0]
         losses = losses[:, :, :original_action_dim]
         loss_dict["losses_after_forward"] = losses.clone().mean().item()
@@ -434,8 +434,10 @@ class SmolVLAPolicy(PreTrainedPolicy):
         losses = losses[:, :, : self.config.max_action_dim]
         loss_dict["losses_after_rm_padding"] = losses.clone().mean().item()
 
-        duration_loss = None
-        per_sample_duration_loss = None
+        duration_clean_loss = None
+        duration_noisy_loss = None
+        per_sample_duration_clean_loss = None
+        per_sample_duration_noisy_loss = None
         if self.config.use_duration_head:
             if "duration_class" not in batch:
                 raise KeyError(
@@ -443,27 +445,71 @@ class SmolVLAPolicy(PreTrainedPolicy):
                     "Enable the duration sidecar wrapper or inject the label in your custom dataset."
                 )
             duration_target = batch["duration_class"].long()
-            duration_logits = duration_logits.to(dtype=torch.float32)
-            per_sample_duration_loss = F.cross_entropy(duration_logits, duration_target, reduction="none")
-            duration_loss = per_sample_duration_loss.mean()
+            if isinstance(duration_output, dict):
+                duration_clean_logits = duration_output["clean_logits"]
+                duration_noisy_logits = duration_output.get("noisy_logits")
+                duration_noisy_weights = duration_output.get("noisy_weights")
+            else:
+                duration_clean_logits = duration_output
+                duration_noisy_logits = None
+                duration_noisy_weights = None
+
+            duration_clean_logits = duration_clean_logits.to(dtype=torch.float32)
+            per_sample_duration_clean_loss = F.cross_entropy(
+                duration_clean_logits, duration_target, reduction="none"
+            )
+            duration_clean_loss = per_sample_duration_clean_loss.mean()
+
+            if duration_noisy_logits is not None:
+                duration_noisy_logits = duration_noisy_logits.to(dtype=torch.float32)
+                per_sample_duration_noisy_loss = F.cross_entropy(
+                    duration_noisy_logits, duration_target, reduction="none"
+                )
+                if duration_noisy_weights is not None:
+                    duration_noisy_weights = duration_noisy_weights.to(
+                        device=per_sample_duration_noisy_loss.device,
+                        dtype=per_sample_duration_noisy_loss.dtype,
+                    )
+                    per_sample_duration_noisy_loss = per_sample_duration_noisy_loss * duration_noisy_weights
+                duration_noisy_loss = per_sample_duration_noisy_loss.mean()
 
             duration_values = torch.as_tensor(
                 self.config.duration_classes,
-                device=duration_logits.device,
+                device=duration_clean_logits.device,
                 dtype=torch.long,
             )
-            duration_pred = duration_logits.argmax(dim=-1)
-            loss_dict["duration_loss"] = duration_loss.item()
+            duration_pred = duration_clean_logits.argmax(dim=-1)
+            loss_dict["duration_loss"] = duration_clean_loss.item()
+            loss_dict["duration_clean_loss"] = duration_clean_loss.item()
             loss_dict["duration_acc"] = (duration_pred == duration_target).float().mean().item()
+            loss_dict["duration_clean_acc"] = loss_dict["duration_acc"]
             loss_dict["duration_pred_mean"] = duration_values[duration_pred].float().mean().item()
             loss_dict["duration_target_mean"] = duration_values[duration_target].float().mean().item()
+            if duration_noisy_loss is not None:
+                noisy_pred = duration_noisy_logits.argmax(dim=-1)
+                loss_dict["duration_noisy_loss"] = duration_noisy_loss.item()
+                loss_dict["duration_noisy_acc"] = (noisy_pred == duration_target).float().mean().item()
+                if duration_noisy_weights is not None:
+                    loss_dict["duration_noisy_weight_mean"] = duration_noisy_weights.mean().item()
+                    loss_dict["duration_noisy_weight_min"] = duration_noisy_weights.min().item()
+                    loss_dict["duration_noisy_weight_max"] = duration_noisy_weights.max().item()
+
+        duration_clean_loss_weight = (
+            self.config.duration_loss_weight
+            if self.config.duration_clean_loss_weight < 0
+            else self.config.duration_clean_loss_weight
+        )
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
             per_sample_action_loss = losses.mean(dim=(1, 2))
             per_sample_loss = per_sample_action_loss
-            if per_sample_duration_loss is not None:
-                per_sample_loss = per_sample_loss + self.config.duration_loss_weight * per_sample_duration_loss
+            if per_sample_duration_clean_loss is not None:
+                per_sample_loss = per_sample_loss + duration_clean_loss_weight * per_sample_duration_clean_loss
+            if per_sample_duration_noisy_loss is not None:
+                per_sample_loss = (
+                    per_sample_loss + self.config.duration_noisy_loss_weight * per_sample_duration_noisy_loss
+                )
             loss_dict["action_loss"] = per_sample_action_loss.mean().item()
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
@@ -471,9 +517,13 @@ class SmolVLAPolicy(PreTrainedPolicy):
             # Default: return scalar mean loss
             action_loss = losses.mean()
             loss = action_loss
-            if duration_loss is not None:
-                loss = loss + self.config.duration_loss_weight * duration_loss
+            if duration_clean_loss is not None:
+                loss = loss + duration_clean_loss_weight * duration_clean_loss
+            if duration_noisy_loss is not None:
+                loss = loss + self.config.duration_noisy_loss_weight * duration_noisy_loss
             loss_dict["action_loss"] = action_loss.item()
+            loss_dict["duration_clean_loss_weight"] = duration_clean_loss_weight
+            loss_dict["duration_noisy_loss_weight"] = self.config.duration_noisy_loss_weight
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
 
@@ -947,7 +997,7 @@ class VLAFlowMatching(nn.Module):
             fill_kv_cache=True,
         )
 
-        v_t = self.denoise_step(
+        v_t, noisy_duration_logits = self._forward_suffix_with_prefix_cache(
             prefix_pad_masks=prefix_pad_masks,
             past_key_values=past_key_values,
             x_t=x_t,
@@ -964,7 +1014,16 @@ class VLAFlowMatching(nn.Module):
             timestep=clean_time,
             use_cache=True,
         )
-        return losses, duration_logits
+        duration_outputs = {
+            "clean_logits": duration_logits,
+            "noisy_logits": noisy_duration_logits,
+            "noisy_weights": self.duration_noisy_weights(time),
+        }
+        return losses, duration_outputs
+
+    def duration_noisy_weights(self, time: Tensor) -> Tensor:
+        sigma = self.config.duration_noisy_sigma
+        return torch.exp(-(time.to(dtype=torch.float32) ** 2) / (sigma**2))
 
     def forward(
         self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None
@@ -1016,6 +1075,7 @@ class VLAFlowMatching(nn.Module):
         v_t = self.action_out_proj(action_suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
         if self.config.use_duration_head:
+            noisy_duration_logits = self._duration_logits_from_suffix_out(suffix_out)
             clean_time = torch.zeros(actions.shape[0], dtype=torch.float32, device=actions.device)
             clean_suffix_embs, clean_suffix_pad_masks, clean_suffix_att_masks = self.embed_suffix(
                 actions, clean_time
@@ -1033,7 +1093,12 @@ class VLAFlowMatching(nn.Module):
                 fill_kv_cache=False,
             )
             duration_logits = self._duration_logits_from_suffix_out(clean_suffix_out)
-            return losses, duration_logits
+            duration_outputs = {
+                "clean_logits": duration_logits,
+                "noisy_logits": noisy_duration_logits,
+                "noisy_weights": self.duration_noisy_weights(time),
+            }
+            return losses, duration_outputs
         return losses
 
     def sample_actions(
@@ -1144,7 +1209,7 @@ class VLAFlowMatching(nn.Module):
         suffix_out = outputs_embeds[1]
         return self._duration_logits_from_suffix_out(suffix_out)
 
-    def denoise_step(
+    def _forward_suffix_with_prefix_cache(
         self,
         prefix_pad_masks,
         past_key_values,
@@ -1152,7 +1217,6 @@ class VLAFlowMatching(nn.Module):
         timestep,
         use_cache=None,
     ):
-        """Apply one denoising step of the noise `x_t` at a given timestep."""
         use_cache = self.config.use_cache if use_cache is None else use_cache
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(x_t, timestep)
 
@@ -1181,4 +1245,25 @@ class VLAFlowMatching(nn.Module):
         suffix_out = suffix_out.to(dtype=torch.float32)
         action_suffix_out, _duration_suffix_out = self._split_suffix_out(suffix_out)
         v_t = self.action_out_proj(action_suffix_out)
+        duration_logits = None
+        if self.config.use_duration_head:
+            duration_logits = self._duration_logits_from_suffix_out(suffix_out)
+        return v_t, duration_logits
+
+    def denoise_step(
+        self,
+        prefix_pad_masks,
+        past_key_values,
+        x_t,
+        timestep,
+        use_cache=None,
+    ):
+        """Apply one denoising step of the noise `x_t` at a given timestep."""
+        v_t, _duration_logits = self._forward_suffix_with_prefix_cache(
+            prefix_pad_masks=prefix_pad_masks,
+            past_key_values=past_key_values,
+            x_t=x_t,
+            timestep=timestep,
+            use_cache=use_cache,
+        )
         return v_t
