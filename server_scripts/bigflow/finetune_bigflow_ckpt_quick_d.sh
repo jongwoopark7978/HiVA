@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+source "${REPO_ROOT}/server_scripts/common_wandb.sh"
 
 LOG_DIR="${REPO_ROOT}/outputs/train_logs"
 mkdir -p "${LOG_DIR}"
@@ -36,12 +37,14 @@ mkdir -p "${HF_DATASETS_CACHE}"
 
 RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigflow_smoke_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
+build_wandb_args
 
 echo "Host: $(hostname)"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "DATA_ROOT=${DATA_ROOT}"
 echo "SIDECAR=${SIDECAR}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
+print_wandb_config
 echo "ACCELERATE_BIN=${ACCELERATE_BIN}"
 echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
 
@@ -80,4 +83,5 @@ echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
   --job_name="${RUN_NAME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
-  --eval_freq="${EVAL_FREQ:-0}"
+  --eval_freq="${EVAL_FREQ:-0}" \
+  "${WANDB_ARGS[@]}"

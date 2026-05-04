@@ -6,6 +6,8 @@ set -euo pipefail
 #   NUM_GPUS=4 \
 #   BATCH_PER_GPU=192 \
 #   S=2 \
+#   WANDB_ENABLE=true \
+#   WANDB_PROJECT=lerobot \
 #   bash server_scripts/bigbrain/finetune_bigbrain_ckpt_20k_d.sh
 #
 # You can also override the schedule directly for a smoke test:
@@ -15,6 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+source "${REPO_ROOT}/server_scripts/common_wandb.sh"
 
 LOG_DIR="${REPO_ROOT}/outputs/train_logs"
 mkdir -p "${LOG_DIR}"
@@ -99,6 +102,7 @@ mkdir -p "${HF_DATASETS_CACHE}"
 
 RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigbrain_full_s${S}_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
+build_wandb_args
 
 GLOBAL_BATCH_SIZE=$((NUM_GPUS * BATCH_PER_GPU))
 BASE_GLOBAL_BATCH_SIZE=$((BASE_NUM_GPUS * BASE_BATCH_PER_GPU))
@@ -133,7 +137,7 @@ SCHEDULER_DECAY_STEPS="${SCHEDULER_DECAY_STEPS:-${STEPS}}"
 
 SAVE_FREQ="${SAVE_FREQ:-$(python - <<PY
 steps = int("${STEPS}")
-print(max(1, steps // 5))
+print(max(1, (steps + 1) // 2))
 PY
 )}"
 
@@ -156,6 +160,7 @@ echo "SCHEDULER_WARMUP_STEPS=${SCHEDULER_WARMUP_STEPS}"
 echo "SCHEDULER_DECAY_STEPS=${SCHEDULER_DECAY_STEPS}"
 echo "SCHEDULER_DECAY_LR=${SCHEDULER_DECAY_LR}"
 echo "EVAL_FREQ=${EVAL_FREQ}"
+print_wandb_config
 echo "ACCELERATE_BIN=${ACCELERATE_BIN}"
 echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
 
@@ -197,4 +202,5 @@ echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
   --job_name="${RUN_NAME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
-  --eval_freq="${EVAL_FREQ}"
+  --eval_freq="${EVAL_FREQ}" \
+  "${WANDB_ARGS[@]}"

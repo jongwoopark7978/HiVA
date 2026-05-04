@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+source "${REPO_ROOT}/server_scripts/common_wandb.sh"
 
 LOG_DIR="${REPO_ROOT}/outputs/train_logs"
 mkdir -p "${LOG_DIR}"
@@ -37,6 +38,7 @@ mkdir -p "${HF_DATASETS_CACHE}"
 
 RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigcornea_smoke_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
+build_wandb_args
 
 BATCH_SIZE="${BATCH_SIZE:-8}"
 STEPS="${STEPS:-5}"
@@ -51,6 +53,7 @@ echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "BATCH_SIZE=${BATCH_SIZE}"
 echo "STEPS=${STEPS}"
 echo "EVAL_FREQ=${EVAL_FREQ}"
+print_wandb_config
 echo "ACCELERATE_BIN=${ACCELERATE_BIN}"
 echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
 
@@ -90,4 +93,5 @@ echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
   --job_name="${RUN_NAME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
-  --eval_freq="${EVAL_FREQ}"
+  --eval_freq="${EVAL_FREQ}" \
+  "${WANDB_ARGS[@]}"

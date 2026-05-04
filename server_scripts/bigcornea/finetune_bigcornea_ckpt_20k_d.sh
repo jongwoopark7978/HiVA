@@ -6,10 +6,18 @@ set -euo pipefail
 #   NUM_GPUS=8 \
 #   BATCH_PER_GPU=48 \
 #   S=8 \
+#   WANDB_ENABLE=true \
+#   WANDB_PROJECT=lerobot \
 #   bash server_scripts/bigcornea/finetune_bigcornea_ckpt_20k_d.sh
 #
 # You can also override the schedule directly for a smoke test:
 #   GPU_IDS=0 NUM_GPUS=1 NUM_PROCESSES=1 BATCH_PER_GPU=4 STEPS=1 SAVE_FREQ=1 \
+#   bash server_scripts/bigcornea/finetune_bigcornea_ckpt_20k_d.sh
+#
+# To resume from an existing checkpointed output directory:
+#   RESUME=true \
+#   OUTPUT_DIR=/home/jongwoopark/lerobot/outputs/train/<run_name> \
+#   RUN_NAME=<run_name> \
 #   bash server_scripts/bigcornea/finetune_bigcornea_ckpt_20k_d.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,6 +88,7 @@ BASE_STEPS="${BASE_STEPS:-20000}"
 WARMUP_RATIO="${WARMUP_RATIO:-0.03}"
 SCHEDULER_DECAY_LR="${SCHEDULER_DECAY_LR:-2.5e-6}"
 EVAL_FREQ="${EVAL_FREQ:-0}"
+RESUME="${RESUME:-false}"
 
 export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
@@ -102,6 +111,13 @@ mkdir -p "${HF_DATASETS_CACHE}"
 
 RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigcornea_full_s${S}_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
+
+WANDB_ENABLE="${WANDB_ENABLE:-false}"
+WANDB_PROJECT="${WANDB_PROJECT:-lerobot}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_MODE="${WANDB_MODE:-online}"
+WANDB_DISABLE_ARTIFACT="${WANDB_DISABLE_ARTIFACT:-true}"
+WANDB_NOTES="${WANDB_NOTES:-}"
 
 GLOBAL_BATCH_SIZE=$((NUM_GPUS * BATCH_PER_GPU))
 BASE_GLOBAL_BATCH_SIZE=$((BASE_NUM_GPUS * BASE_BATCH_PER_GPU))
@@ -136,7 +152,7 @@ SCHEDULER_DECAY_STEPS="${SCHEDULER_DECAY_STEPS:-${STEPS}}"
 
 SAVE_FREQ="${SAVE_FREQ:-$(python - <<PY
 steps = int("${STEPS}")
-print(max(1, steps // 5))
+print(max(1, (steps + 1) // 2))
 PY
 )}"
 
@@ -159,8 +175,32 @@ echo "SCHEDULER_WARMUP_STEPS=${SCHEDULER_WARMUP_STEPS}"
 echo "SCHEDULER_DECAY_STEPS=${SCHEDULER_DECAY_STEPS}"
 echo "SCHEDULER_DECAY_LR=${SCHEDULER_DECAY_LR}"
 echo "EVAL_FREQ=${EVAL_FREQ}"
+echo "RESUME=${RESUME}"
+echo "WANDB_ENABLE=${WANDB_ENABLE}"
+echo "WANDB_PROJECT=${WANDB_PROJECT}"
+echo "WANDB_ENTITY=${WANDB_ENTITY:-<unset>}"
+echo "WANDB_MODE=${WANDB_MODE}"
+echo "WANDB_DISABLE_ARTIFACT=${WANDB_DISABLE_ARTIFACT}"
 echo "ACCELERATE_BIN=${ACCELERATE_BIN}"
 echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
+
+WANDB_ARGS=(
+  --wandb.enable="${WANDB_ENABLE}"
+  --wandb.project="${WANDB_PROJECT}"
+  --wandb.disable_artifact="${WANDB_DISABLE_ARTIFACT}"
+)
+
+if [[ -n "${WANDB_ENTITY}" ]]; then
+  WANDB_ARGS+=(--wandb.entity="${WANDB_ENTITY}")
+fi
+
+if [[ -n "${WANDB_MODE}" ]]; then
+  WANDB_ARGS+=(--wandb.mode="${WANDB_MODE}")
+fi
+
+if [[ -n "${WANDB_NOTES}" ]]; then
+  WANDB_ARGS+=(--wandb.notes="${WANDB_NOTES}")
+fi
 
 "${ACCELERATE_BIN}" launch \
   --num_processes="${NUM_PROCESSES}" \
@@ -198,6 +238,8 @@ echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
   --env.task="${TASKS}" \
   --output_dir="${OUTPUT_DIR}" \
   --job_name="${RUN_NAME}" \
+  --resume="${RESUME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
-  --eval_freq="${EVAL_FREQ}"
+  --eval_freq="${EVAL_FREQ}" \
+  "${WANDB_ARGS[@]}"

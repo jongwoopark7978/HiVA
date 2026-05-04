@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+source "${REPO_ROOT}/server_scripts/common_wandb.sh"
 
 LOG_DIR="outputs/train_logs"
 mkdir -p "${LOG_DIR}"
@@ -41,6 +42,8 @@ mkdir -p "${HF_DATASETS_CACHE}"
 # mkdir -p "${HF_DATASETS_CACHE}"
 
 RUN_NAME="smolvla_libero_from_official_$(date +%Y%m%d_%H%M%S)"
+build_wandb_args
+print_wandb_config
 
 # 20k recommended.
 # actual run with bs128
@@ -72,6 +75,7 @@ accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which 
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
   --eval_freq="${EVAL_FREQ:-0}" \
+  "${WANDB_ARGS[@]}"
 
 
 
@@ -112,4 +116,3 @@ accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which 
 # 256   OOM
 # 320	OOM
 # 384	OOM
-

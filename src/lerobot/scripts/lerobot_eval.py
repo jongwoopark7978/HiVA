@@ -51,6 +51,7 @@ import json
 import logging
 import threading
 import time
+import textwrap
 from collections import defaultdict
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -99,14 +100,25 @@ def _draw_duration_eval_overlay(
     *,
     duration: int | None,
     inference_call: int,
+    mean_duration: float | None = None,
+    total_time_s: float | None = None,
+    success: bool | None = None,
+    task_prompt: str | None = None,
 ) -> np.ndarray:
     image = Image.fromarray(image_np.astype(np.uint8))
     draw = ImageDraw.Draw(image, "RGBA")
     font = ImageFont.load_default()
 
     duration_text = "-" if duration is None else str(duration)
+    mean_duration_text = "-" if mean_duration is None else f"{mean_duration:.1f}"
+    total_time_text = "-" if total_time_s is None else f"{total_time_s:.1f}s"
+    success_text = "SC=?" if success is None else ("SC" if success else "FA")
+    prompt_lines = textwrap.wrap(task_prompt, width=42) if task_prompt else []
     lines = [
+        *prompt_lines,
         f"D={duration_text} INF={inference_call}",
+        f"MD={mean_duration_text} TT={total_time_text}",
+        success_text,
     ]
 
     margin = 8
@@ -121,17 +133,76 @@ def _draw_duration_eval_overlay(
     return np.asarray(image)
 
 
-def _maybe_draw_policy_duration_overlay(image_np: np.ndarray, policy: PreTrainedPolicy) -> np.ndarray:
-    if not getattr(policy.config, "use_duration_head", False):
-        return image_np
-
+def _policy_duration_overlay_info(policy: PreTrainedPolicy) -> dict[str, Any]:
     duration = getattr(policy, "_last_execution_horizon", None)
     inference_call = int(getattr(policy, "_duration_inference_count", 0))
+    horizon_sum = float(getattr(policy, "_execution_horizon_sum", 0))
+    duration_sequence = [int(value) for value in getattr(policy, "_execution_horizon_history", [])]
+    mean_duration = horizon_sum / inference_call if inference_call > 0 else None
+    return {
+        "duration": duration,
+        "duration_sequence": duration_sequence,
+        "inference_call": inference_call,
+        "mean_duration": mean_duration,
+    }
+
+
+def _draw_policy_duration_overlay(
+    image_np: np.ndarray,
+    overlay_info: dict[str, int | float | None],
+    *,
+    total_time_s: float | None = None,
+    success: bool | None = None,
+    task_prompt: str | None = None,
+) -> np.ndarray:
     return _draw_duration_eval_overlay(
         image_np,
-        duration=duration,
-        inference_call=inference_call,
+        duration=overlay_info.get("duration"),
+        inference_call=int(overlay_info.get("inference_call") or 0),
+        mean_duration=overlay_info.get("mean_duration"),
+        total_time_s=total_time_s,
+        success=success,
+        task_prompt=task_prompt,
     )
+
+
+def _json_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _json_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _mean_optional_numbers(values: list[int | float | None]) -> float | None:
+    numeric_values = [float(value) for value in values if value is not None]
+    if not numeric_values:
+        return None
+    return float(np.nanmean(numeric_values))
+
+
+def _last_optional_int(values: Any) -> int | None:
+    if not values:
+        return None
+    return int(values[-1])
+
+
+def _task_prompt_from_env(env: gym.vector.VectorEnv) -> str | None:
+    try:
+        result = env.call("task_description")
+    except Exception as exc:
+        logging.warning("Could not read task_description from env: %s", exc)
+        return None
+    if isinstance(result, str):
+        return result
+    if isinstance(result, (list, tuple)) and result:
+        first = result[0]
+        return first if isinstance(first, str) else str(first)
+    return None
 
 
 def rollout(
@@ -183,6 +254,8 @@ def rollout(
     observation, info = env.reset(seed=seeds)
     if render_callback is not None:
         render_callback(env)
+    episode_start_times = np.array([time.perf_counter()] * env.num_envs)
+    episode_total_times: list[float | None] = [None] * env.num_envs
 
     all_observations = []
     all_actions = []
@@ -229,8 +302,6 @@ def rollout(
 
         # Apply the next action.
         observation, reward, terminated, truncated, info = env.step(action_numpy)
-        if render_callback is not None:
-            render_callback(env)
 
         # VectorEnv stores is_success in `info["final_info"][env_index]["is_success"]`. "final_info" isn't
         # available if none of the envs finished.
@@ -249,9 +320,18 @@ def rollout(
         # Mark the episode as done if we reach the maximum step limit.
         # This ensures that the rollout always terminates cleanly at `max_steps`,
         # and allows logging/saving (e.g., videos) to be triggered consistently.
-        done = terminated | truncated | done
+        next_done = terminated | truncated | done
         if step + 1 == max_steps:
-            done = np.ones_like(done, dtype=bool)
+            next_done = np.ones_like(next_done, dtype=bool)
+        episode_done_time = time.perf_counter()
+        newly_done = next_done & ~done
+        for env_ix, is_new_done in enumerate(newly_done):
+            if is_new_done and episode_total_times[env_ix] is None:
+                episode_total_times[env_ix] = episode_done_time - episode_start_times[env_ix]
+        done = next_done
+
+        if render_callback is not None:
+            render_callback(env)
 
         all_actions.append(torch.from_numpy(action_numpy))
         all_rewards.append(torch.from_numpy(reward))
@@ -276,6 +356,10 @@ def rollout(
         "reward": torch.stack(all_rewards, dim=1),
         "success": torch.stack(all_successes, dim=1),
         "done": torch.stack(all_dones, dim=1),
+        "episode_total_time_s": torch.tensor(
+            [t if t is not None else time.perf_counter() - episode_start_times[i] for i, t in enumerate(episode_total_times)],
+            dtype=torch.float32,
+        ),
     }
     if return_observations:
         stacked_observations = {}
@@ -333,6 +417,7 @@ def eval_policy(
 
     start = time.time()
     policy.eval()
+    task_prompt = _task_prompt_from_env(env)
 
     # Determine how many batched rollouts we need to get n_episodes. Note that if n_episodes is not evenly
     # divisible by env.num_envs we end up discarding some data in the last batch.
@@ -345,6 +430,7 @@ def eval_policy(
     all_seeds = []
     threads = []  # for video saving threads
     n_episodes_rendered = 0  # for saving the correct number of videos
+    episode_display_metrics: list[dict[str, Any]] = []
 
     # Callback for visualization.
     def render_frame(env: gym.vector.VectorEnv):
@@ -359,7 +445,10 @@ def eval_policy(
             frames = env.call("render")[:n_to_render_now]
         else:
             raise ValueError(f"Unsupported vector env type for rendering: {type(env)}.")
-        ep_frames.append(np.stack([_maybe_draw_policy_duration_overlay(frame, policy) for frame in frames]))
+        frames = frames[:n_to_render_now]
+        ep_frames.append(np.stack(frames))
+        overlay_info = _policy_duration_overlay_info(policy)
+        ep_overlay_infos.append([overlay_info.copy() for _ in frames])
 
     if max_episodes_rendered > 0:
         video_paths: list[str] = []
@@ -374,6 +463,7 @@ def eval_policy(
         # step.
         if max_episodes_rendered > 0:
             ep_frames: list[np.ndarray] = []
+            ep_overlay_infos: list[list[dict[str, Any]]] = []
 
         if start_seed is None:
             seeds = None
@@ -414,6 +504,30 @@ def eval_policy(
         else:
             all_seeds.append(None)
 
+        n_metrics_to_take = min(env.num_envs, n_episodes - len(episode_display_metrics))
+        for env_ix in range(n_metrics_to_take):
+            done_index = int(done_indices[env_ix].item())
+            final_overlay_info = None
+            if max_episodes_rendered > 0 and len(ep_overlay_infos) > 0:
+                final_step_ix = min(done_index, len(ep_overlay_infos) - 1)
+                if env_ix < len(ep_overlay_infos[final_step_ix]):
+                    final_overlay_info = ep_overlay_infos[final_step_ix][env_ix]
+            if final_overlay_info is None:
+                final_overlay_info = _policy_duration_overlay_info(policy)
+
+            total_time_s = float(rollout_data["episode_total_time_s"][env_ix].item())
+            episode_display_metrics.append(
+                {
+                    "duration": [
+                        int(duration) for duration in final_overlay_info.get("duration_sequence", [])
+                    ],
+                    "inference_calls": int(final_overlay_info.get("inference_call") or 0),
+                    "mean_duration": _json_optional_float(final_overlay_info.get("mean_duration")),
+                    "total_time_s": total_time_s,
+                    "task_prompt": task_prompt,
+                }
+            )
+
         # FIXME: episode_data is either None or it doesn't exist
         if return_episode_data:
             this_episode_data = _compile_episode_data(
@@ -435,8 +549,14 @@ def eval_policy(
         # Maybe render video for visualization.
         if max_episodes_rendered > 0 and len(ep_frames) > 0:
             batch_stacked_frames = np.stack(ep_frames, axis=1)  # (b, t, *)
-            for stacked_frames, done_index in zip(
-                batch_stacked_frames, done_indices.flatten().tolist(), strict=False
+            for env_ix, (stacked_frames, done_index, success, total_time_s) in enumerate(
+                zip(
+                    batch_stacked_frames,
+                    done_indices.flatten().tolist(),
+                    batch_successes.tolist(),
+                    rollout_data["episode_total_time_s"].flatten().tolist(),
+                    strict=False,
+                )
             ):
                 if n_episodes_rendered >= max_episodes_rendered:
                     break
@@ -444,11 +564,24 @@ def eval_policy(
                 videos_dir.mkdir(parents=True, exist_ok=True)
                 video_path = videos_dir / f"eval_episode_{n_episodes_rendered}.mp4"
                 video_paths.append(str(video_path))
+                frame_infos = [step_infos[env_ix] for step_infos in ep_overlay_infos[: done_index + 1]]
+                frames_with_overlay = np.stack(
+                    [
+                        _draw_policy_duration_overlay(
+                        frame,
+                        info,
+                        total_time_s=float(total_time_s),
+                        success=bool(success),
+                        task_prompt=task_prompt,
+                    )
+                        for frame, info in zip(stacked_frames[: done_index + 1], frame_infos, strict=False)
+                    ]
+                )
                 thread = threading.Thread(
                     target=write_video,
                     args=(
                         str(video_path),
-                        stacked_frames[: done_index + 1],  # + 1 to capture the last observation
+                        frames_with_overlay,  # + 1 to capture the last observation
                         env.unwrapped.metadata["render_fps"],
                     ),
                 )
@@ -473,13 +606,15 @@ def eval_policy(
                 "max_reward": max_reward,
                 "success": success,
                 "seed": seed,
+                "display_metrics": display_metrics,
             }
-            for i, (sum_reward, max_reward, success, seed) in enumerate(
+            for i, (sum_reward, max_reward, success, seed, display_metrics) in enumerate(
                 zip(
                     sum_rewards[:n_episodes],
                     max_rewards[:n_episodes],
                     all_successes[:n_episodes],
                     all_seeds[:n_episodes],
+                    episode_display_metrics[:n_episodes],
                     strict=True,
                 )
             )
@@ -488,6 +623,18 @@ def eval_policy(
             "avg_sum_reward": float(np.nanmean(sum_rewards[:n_episodes])),
             "avg_max_reward": float(np.nanmean(max_rewards[:n_episodes])),
             "pc_success": float(np.nanmean(all_successes[:n_episodes]) * 100),
+            "mean_final_duration": _mean_optional_numbers(
+                [_last_optional_int(metrics["duration"]) for metrics in episode_display_metrics[:n_episodes]]
+            ),
+            "mean_inference_calls": _mean_optional_numbers(
+                [metrics["inference_calls"] for metrics in episode_display_metrics[:n_episodes]]
+            ),
+            "mean_duration": _mean_optional_numbers(
+                [metrics["mean_duration"] for metrics in episode_display_metrics[:n_episodes]]
+            ),
+            "mean_total_time_s": _mean_optional_numbers(
+                [metrics["total_time_s"] for metrics in episode_display_metrics[:n_episodes]]
+            ),
             "eval_s": time.time() - start,
             "eval_ep_s": (time.time() - start) / n_episodes,
         },
@@ -602,7 +749,7 @@ def eval_main(cfg: EvalPipelineConfig):
             preprocessor=preprocessor,
             postprocessor=postprocessor,
             n_episodes=cfg.eval.n_episodes,
-            max_episodes_rendered=10,
+            max_episodes_rendered=cfg.eval.max_episodes_rendered,
             videos_dir=Path(cfg.output_dir) / "videos",
             start_seed=cfg.seed,
             max_parallel_tasks=cfg.env.max_parallel_tasks,
@@ -630,9 +777,28 @@ class TaskMetrics(TypedDict):
     max_rewards: list[float]
     successes: list[bool]
     video_paths: list[str]
+    durations: list[int | None]
+    duration_sequences: list[list[int]]
+    inference_calls: list[int]
+    mean_durations: list[float | None]
+    total_times_s: list[float]
+    episode_metrics: list[dict[str, Any]]
+    task_prompt: str | None
 
 
-ACC_KEYS = ("sum_rewards", "max_rewards", "successes", "video_paths")
+ACC_KEYS = (
+    "sum_rewards",
+    "max_rewards",
+    "successes",
+    "video_paths",
+    "durations",
+    "duration_sequences",
+    "inference_calls",
+    "mean_durations",
+    "total_times_s",
+    "episode_metrics",
+    "task_prompt",
+)
 
 
 def eval_one(
@@ -668,11 +834,19 @@ def eval_one(
     )
 
     per_episode = task_result["per_episode"]
+    display_metrics = [ep["display_metrics"] for ep in per_episode]
     return TaskMetrics(
         sum_rewards=[ep["sum_reward"] for ep in per_episode],
         max_rewards=[ep["max_reward"] for ep in per_episode],
         successes=[ep["success"] for ep in per_episode],
         video_paths=task_result.get("video_paths", []),
+        durations=[_last_optional_int(metrics["duration"]) for metrics in display_metrics],
+        duration_sequences=[metrics["duration"] for metrics in display_metrics],
+        inference_calls=[metrics["inference_calls"] for metrics in display_metrics],
+        mean_durations=[metrics["mean_duration"] for metrics in display_metrics],
+        total_times_s=[metrics["total_time_s"] for metrics in display_metrics],
+        episode_metrics=per_episode,
+        task_prompt=display_metrics[0].get("task_prompt") if display_metrics else None,
     )
 
 
@@ -772,6 +946,14 @@ def eval_policy_all(
         _append("sum_rewards", metrics.get("sum_rewards"))
         _append("max_rewards", metrics.get("max_rewards"))
         _append("successes", metrics.get("successes"))
+        _append("durations", metrics.get("durations"))
+        _append("duration_sequences", metrics.get("duration_sequences"))
+        _append("inference_calls", metrics.get("inference_calls"))
+        _append("mean_durations", metrics.get("mean_durations"))
+        _append("total_times_s", metrics.get("total_times_s"))
+        _append("episode_metrics", metrics.get("episode_metrics"))
+        group_acc[group]["task_prompt"].append(metrics.get("task_prompt"))
+        overall["task_prompt"].append(metrics.get("task_prompt"))
         # video_paths is list-like
         paths = metrics.get("video_paths", [])
         if paths:
@@ -799,7 +981,9 @@ def eval_policy_all(
         for task_group, task_id, env in tasks:
             tg, tid, metrics = task_runner(task_group, task_id, env)
             _accumulate_to(tg, metrics)
-            per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
+            per_task_infos.append(
+                {"task_group": tg, "task_id": tid, "task_prompt": metrics.get("task_prompt"), "metrics": metrics}
+            )
     else:
         # threaded path: submit all tasks, consume completions on main thread and accumulate there
         with cf.ThreadPoolExecutor(max_workers=max_parallel_tasks) as executor:
@@ -810,13 +994,16 @@ def eval_policy_all(
             for fut in cf.as_completed(fut2meta):
                 tg, tid, metrics = fut.result()
                 _accumulate_to(tg, metrics)
-                per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
+                per_task_infos.append(
+                    {"task_group": tg, "task_id": tid, "task_prompt": metrics.get("task_prompt"), "metrics": metrics}
+                )
 
     # compute aggregated metrics helper (robust to lists/scalars)
     def _agg_from_list(xs):
-        if not xs:
+        numeric_values = [x for x in xs if x is not None]
+        if not numeric_values:
             return float("nan")
-        arr = np.array(xs, dtype=float)
+        arr = np.array(numeric_values, dtype=float)
         return float(np.nanmean(arr))
 
     # compute per-group aggregates
@@ -827,6 +1014,12 @@ def eval_policy_all(
             "avg_max_reward": _agg_from_list(acc["max_rewards"]),
             "pc_success": _agg_from_list(acc["successes"]) * 100 if acc["successes"] else float("nan"),
             "n_episodes": len(acc["sum_rewards"]),
+            "mean_final_duration": _agg_from_list(acc["durations"]),
+            "mean_inference_calls": _agg_from_list(acc["inference_calls"]),
+            "mean_duration": _agg_from_list(acc["mean_durations"]),
+            "mean_total_time_s": _agg_from_list(acc["total_times_s"]),
+            "task_prompts": sorted({prompt for prompt in acc["task_prompt"] if prompt}),
+            "episode_metrics": list(acc["episode_metrics"]),
             "video_paths": list(acc["video_paths"]),
         }
 
@@ -836,8 +1029,14 @@ def eval_policy_all(
         "avg_max_reward": _agg_from_list(overall["max_rewards"]),
         "pc_success": _agg_from_list(overall["successes"]) * 100 if overall["successes"] else float("nan"),
         "n_episodes": len(overall["sum_rewards"]),
+        "mean_final_duration": _agg_from_list(overall["durations"]),
+        "mean_inference_calls": _agg_from_list(overall["inference_calls"]),
+        "mean_duration": _agg_from_list(overall["mean_durations"]),
+        "mean_total_time_s": _agg_from_list(overall["total_times_s"]),
         "eval_s": time.time() - start_t,
         "eval_ep_s": (time.time() - start_t) / max(1, len(overall["sum_rewards"])),
+        "task_prompts": sorted({prompt for prompt in overall["task_prompt"] if prompt}),
+        "episode_metrics": list(overall["episode_metrics"]),
         "video_paths": list(overall["video_paths"]),
     }
 

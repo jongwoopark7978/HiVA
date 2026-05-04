@@ -246,6 +246,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self._last_duration_steps = None
         self._last_execution_horizon = None
         self._duration_inference_count = 0
+        self._execution_horizon_sum = 0
+        self._execution_horizon_history = []
         self.reset()
 
     def reset(self):
@@ -256,6 +258,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self._last_duration_steps = None
         self._last_execution_horizon = None
         self._duration_inference_count = 0
+        self._execution_horizon_sum = 0
+        self._execution_horizon_history = []
 
     def init_rtc_processor(self):
         """Initialize RTC processor if RTC is enabled in config."""
@@ -374,10 +378,15 @@ class SmolVLAPolicy(PreTrainedPolicy):
                 execution_horizon = self._execution_horizon_from_duration(duration_steps, actions)
                 self._last_execution_horizon = execution_horizon
                 self._duration_inference_count += 1
+                self._execution_horizon_sum += execution_horizon
+                self._execution_horizon_history.append(execution_horizon)
             else:
                 actions = model_output
                 execution_horizon = self.config.n_action_steps
-                self._last_execution_horizon = None
+                self._last_execution_horizon = execution_horizon
+                self._duration_inference_count += 1
+                self._execution_horizon_sum += execution_horizon
+                self._execution_horizon_history.append(execution_horizon)
 
             # `self.predict_action_chunk` returns a (batch_size, chunk_size, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
@@ -494,18 +503,12 @@ class SmolVLAPolicy(PreTrainedPolicy):
                     loss_dict["duration_noisy_weight_min"] = duration_noisy_weights.min().item()
                     loss_dict["duration_noisy_weight_max"] = duration_noisy_weights.max().item()
 
-        duration_clean_loss_weight = (
-            self.config.duration_loss_weight
-            if self.config.duration_clean_loss_weight < 0
-            else self.config.duration_clean_loss_weight
-        )
-
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
             per_sample_action_loss = losses.mean(dim=(1, 2))
             per_sample_loss = per_sample_action_loss
             if per_sample_duration_clean_loss is not None:
-                per_sample_loss = per_sample_loss + duration_clean_loss_weight * per_sample_duration_clean_loss
+                per_sample_loss = per_sample_loss + self.config.duration_loss_weight * per_sample_duration_clean_loss
             if per_sample_duration_noisy_loss is not None:
                 per_sample_loss = (
                     per_sample_loss + self.config.duration_noisy_loss_weight * per_sample_duration_noisy_loss
@@ -518,11 +521,11 @@ class SmolVLAPolicy(PreTrainedPolicy):
             action_loss = losses.mean()
             loss = action_loss
             if duration_clean_loss is not None:
-                loss = loss + duration_clean_loss_weight * duration_clean_loss
+                loss = loss + self.config.duration_loss_weight * duration_clean_loss
             if duration_noisy_loss is not None:
                 loss = loss + self.config.duration_noisy_loss_weight * duration_noisy_loss
             loss_dict["action_loss"] = action_loss.item()
-            loss_dict["duration_clean_loss_weight"] = duration_clean_loss_weight
+            loss_dict["duration_loss_weight"] = self.config.duration_loss_weight
             loss_dict["duration_noisy_loss_weight"] = self.config.duration_noisy_loss_weight
             loss_dict["loss"] = loss.item()
             return loss, loss_dict

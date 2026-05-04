@@ -19,14 +19,17 @@ set -euo pipefail
 #
 # Example:
 #   GPU_IDS=0,1,2,3 NUM_GPUS=4 BATCH_PER_GPU=96 S=2 \
+#   WANDB_ENABLE=true WANDB_PROJECT=lerobot \
 #   bash server_scripts/bigflow/finetune_bigflow_ckpt_20k_d_clean_noisy.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export DURATION_LOSS_WEIGHT="${DURATION_LOSS_WEIGHT:-0.05}"
-export DURATION_CLEAN_LOSS_WEIGHT="${DURATION_CLEAN_LOSS_WEIGHT:-0.05}"
 export DURATION_NOISY_LOSS_WEIGHT="${DURATION_NOISY_LOSS_WEIGHT:-0.01}"
 export DURATION_NOISY_SIGMA="${DURATION_NOISY_SIGMA:-0.25}"
 export RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_clean_noisy_bigflow_s${S:-2}_$(date +%Y%m%d_%H%M%S)}"
 
 exec bash "${SCRIPT_DIR}/finetune_bigflow_ckpt_20k_d.sh"
+
+# bs, mem
+# 96, 41

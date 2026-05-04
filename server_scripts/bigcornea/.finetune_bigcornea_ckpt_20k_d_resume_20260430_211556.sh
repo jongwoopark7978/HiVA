@@ -1,27 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Example launch on bigflow with explicit hyperparameters:
-#   GPU_IDS=0,1,2,3 \
-#   NUM_GPUS=4 \
-#   BATCH_PER_GPU=96 \
-#   S=2 \
+# Example launch on bigcornea with explicit hyperparameters:
+#   GPU_IDS=0,1,2,3,4,5,6,7 \
+#   NUM_GPUS=8 \
+#   BATCH_PER_GPU=48 \
+#   S=8 \
 #   WANDB_ENABLE=true \
 #   WANDB_PROJECT=lerobot \
-#   bash server_scripts/bigflow/finetune_bigflow_ckpt_20k_d.sh
+#   bash server_scripts/bigcornea/finetune_bigcornea_ckpt_20k_d.sh
 #
 # You can also override the schedule directly for a smoke test:
 #   GPU_IDS=0 NUM_GPUS=1 NUM_PROCESSES=1 BATCH_PER_GPU=4 STEPS=1 SAVE_FREQ=1 \
-#   bash server_scripts/bigflow/finetune_bigflow_ckpt_20k_d.sh
+#   bash server_scripts/bigcornea/finetune_bigcornea_ckpt_20k_d.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
-source "${REPO_ROOT}/server_scripts/common_wandb.sh"
 
 LOG_DIR="${REPO_ROOT}/outputs/train_logs"
 mkdir -p "${LOG_DIR}"
-LOG_FILE="${LOG_DIR}/finetune_bigflow_20k_$(date +%Y%m%d_%H%M%S).log"
+LOG_FILE="${LOG_DIR}/finetune_bigcornea_20k_$(date +%Y%m%d_%H%M%S).log"
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
@@ -54,9 +53,12 @@ echo "Logging to ${LOG_FILE}"
 # that step count by S:
 #   STEPS = BASE_STEPS * BASE_GLOBAL_BATCH_SIZE / GLOBAL_BATCH_SIZE / S
 #
-# With the bigflow defaults:
-#   NUM_GPUS=4, BATCH_PER_GPU=96, GLOBAL_BATCH_SIZE=384
+# With the bigcornea defaults:
+#   NUM_GPUS=8, BATCH_PER_GPU=48, GLOBAL_BATCH_SIZE=384
+#   S=8 -> 417 steps
+#   S=4 -> 834 steps
 #   S=2 -> 1667 steps
+#   S=1 -> 3334 steps
 #
 # Scheduler defaults:
 #   - warmup steps = 3% of STEPS
@@ -67,12 +69,12 @@ echo "Logging to ${LOG_FILE}"
 # EVAL_FREQ=0 unless you explicitly want in-training simulation evaluation.
 ###############################################################################
 
-# Full duration-SmolVLA finetune on bigflow. GPU ids are physical ids before CUDA remapping.
-GPU_IDS="${GPU_IDS:-0,1,2,3}"
-NUM_GPUS="${NUM_GPUS:-4}"
+# Full duration-SmolVLA finetune on bigcornea. GPU ids are physical ids before CUDA remapping.
+GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
+NUM_GPUS="${NUM_GPUS:-8}"
 NUM_PROCESSES="${NUM_PROCESSES:-${NUM_GPUS}}"
-BATCH_PER_GPU="${BATCH_PER_GPU:-96}"
-S="${S:-2}"
+BATCH_PER_GPU="${BATCH_PER_GPU:-48}"
+S="${S:-8}"
 
 BASE_NUM_GPUS="${BASE_NUM_GPUS:-1}"
 BASE_BATCH_PER_GPU="${BASE_BATCH_PER_GPU:-64}"
@@ -80,19 +82,16 @@ BASE_STEPS="${BASE_STEPS:-20000}"
 WARMUP_RATIO="${WARMUP_RATIO:-0.03}"
 SCHEDULER_DECAY_LR="${SCHEDULER_DECAY_LR:-2.5e-6}"
 EVAL_FREQ="${EVAL_FREQ:-0}"
-DURATION_LOSS_WEIGHT="${DURATION_LOSS_WEIGHT:-0.1}"
-DURATION_NOISY_LOSS_WEIGHT="${DURATION_NOISY_LOSS_WEIGHT:-0.0}"
-DURATION_NOISY_SIGMA="${DURATION_NOISY_SIGMA:-0.25}"
 
 export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 
-DATA_ROOT="${DATA_ROOT:-/nfs/bigflow/add_disk0/jongwoopark/libero_lerobot_v3_lerobotkeys}"
+DATA_ROOT="${DATA_ROOT:-/nfs/bigcornea/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys}"
 DATA_REPO_ID="${DATA_REPO_ID:-local/libero_lerobot_v3_lerobotkeys}"
 TASKS="${TASKS:-libero_spatial,libero_object,libero_goal,libero_10}"
-SIDECAR="${SIDECAR:-/nfs/bigflow/add_disk0/jongwoopark/libero_duration_sidecar_all_episodes.parquet}"
+SIDECAR="${SIDECAR:-/nfs/bigcornea/add_disk2/jongwoopark/libero_duration_sidecar_all_episodes.parquet}"
 
 PRETRAINED="${PRETRAINED:-/home/jongwoopark/lerobot/smolvla_libero}"
 CONDA_ENV_BIN="${CONDA_ENV_BIN:-/home/jongwoopark/miniconda3/envs/smolvla_libero/bin}"
@@ -103,9 +102,15 @@ LEROBOT_TRAIN_BIN="${LEROBOT_TRAIN_BIN:-${CONDA_ENV_BIN}/lerobot-train}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
 mkdir -p "${HF_DATASETS_CACHE}"
 
-RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigflow_full_s${S}_$(date +%Y%m%d_%H%M%S)}"
+RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigcornea_full_s${S}_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
-build_wandb_args
+
+WANDB_ENABLE="${WANDB_ENABLE:-false}"
+WANDB_PROJECT="${WANDB_PROJECT:-lerobot}"
+WANDB_ENTITY="${WANDB_ENTITY:-}"
+WANDB_MODE="${WANDB_MODE:-online}"
+WANDB_DISABLE_ARTIFACT="${WANDB_DISABLE_ARTIFACT:-true}"
+WANDB_NOTES="${WANDB_NOTES:-}"
 
 GLOBAL_BATCH_SIZE=$((NUM_GPUS * BATCH_PER_GPU))
 BASE_GLOBAL_BATCH_SIZE=$((BASE_NUM_GPUS * BASE_BATCH_PER_GPU))
@@ -140,7 +145,7 @@ SCHEDULER_DECAY_STEPS="${SCHEDULER_DECAY_STEPS:-${STEPS}}"
 
 SAVE_FREQ="${SAVE_FREQ:-$(python - <<PY
 steps = int("${STEPS}")
-print(max(1, (steps + 1) // 2))
+print(max(1, steps // 5))
 PY
 )}"
 
@@ -163,12 +168,31 @@ echo "SCHEDULER_WARMUP_STEPS=${SCHEDULER_WARMUP_STEPS}"
 echo "SCHEDULER_DECAY_STEPS=${SCHEDULER_DECAY_STEPS}"
 echo "SCHEDULER_DECAY_LR=${SCHEDULER_DECAY_LR}"
 echo "EVAL_FREQ=${EVAL_FREQ}"
-echo "DURATION_LOSS_WEIGHT=${DURATION_LOSS_WEIGHT}"
-echo "DURATION_NOISY_LOSS_WEIGHT=${DURATION_NOISY_LOSS_WEIGHT}"
-echo "DURATION_NOISY_SIGMA=${DURATION_NOISY_SIGMA}"
-print_wandb_config
+echo "WANDB_ENABLE=${WANDB_ENABLE}"
+echo "WANDB_PROJECT=${WANDB_PROJECT}"
+echo "WANDB_ENTITY=${WANDB_ENTITY:-<unset>}"
+echo "WANDB_MODE=${WANDB_MODE}"
+echo "WANDB_DISABLE_ARTIFACT=${WANDB_DISABLE_ARTIFACT}"
 echo "ACCELERATE_BIN=${ACCELERATE_BIN}"
 echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
+
+WANDB_ARGS=(
+  --wandb.enable="${WANDB_ENABLE}"
+  --wandb.project="${WANDB_PROJECT}"
+  --wandb.disable_artifact="${WANDB_DISABLE_ARTIFACT}"
+)
+
+if [[ -n "${WANDB_ENTITY}" ]]; then
+  WANDB_ARGS+=(--wandb.entity="${WANDB_ENTITY}")
+fi
+
+if [[ -n "${WANDB_MODE}" ]]; then
+  WANDB_ARGS+=(--wandb.mode="${WANDB_MODE}")
+fi
+
+if [[ -n "${WANDB_NOTES}" ]]; then
+  WANDB_ARGS+=(--wandb.notes="${WANDB_NOTES}")
+fi
 
 "${ACCELERATE_BIN}" launch \
   --num_processes="${NUM_PROCESSES}" \
@@ -184,9 +208,7 @@ echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
   --policy.freeze_vision_encoder=true \
   --policy.use_duration_head=true \
   --policy.duration_train_reuse_prefix_cache=true \
-  --policy.duration_loss_weight="${DURATION_LOSS_WEIGHT}" \
-  --policy.duration_noisy_loss_weight="${DURATION_NOISY_LOSS_WEIGHT}" \
-  --policy.duration_noisy_sigma="${DURATION_NOISY_SIGMA}" \
+  --policy.duration_loss_weight=0.1 \
   --policy.duration_sidecar_path="${SIDECAR}" \
   --batch_size="${BATCH_SIZE}" \
   --steps="${STEPS}" \

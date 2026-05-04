@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+source "${REPO_ROOT}/server_scripts/common_wandb.sh"
 
 LOG_DIR="outputs/train_logs"
 mkdir -p "${LOG_DIR}"
@@ -37,6 +38,8 @@ export HF_DATASETS_CACHE="/nfs/bigquery.cs.stonybrook.edu/add_disk0/jongwoopark/
 mkdir -p "${HF_DATASETS_CACHE}"
 
 RUN_NAME="smolvla_libero_multitask_$(date +%Y%m%d_%H%M%S)"
+build_wandb_args
+print_wandb_config
 
 # 20k recommended.
 # steps, warmup_steps, decay_steps can be scaled down/up proportionally.
@@ -67,7 +70,8 @@ accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which 
   --job_name="${RUN_NAME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
-  --eval_freq="${EVAL_FREQ:-0}"
+  --eval_freq="${EVAL_FREQ:-0}" \
+  "${WANDB_ARGS[@]}"
 
 
 # bs	mem
@@ -76,4 +80,3 @@ accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which 
 # 192	56
 # 320	80
 # 384	94
-

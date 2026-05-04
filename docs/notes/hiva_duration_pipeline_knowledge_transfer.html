@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HiVA Duration Pipeline Knowledge Transfer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17202a;
+      --muted: #586575;
+      --line: #d9e0e7;
+      --bg: #f7f9fb;
+      --panel: #ffffff;
+      --accent: #2457a6;
+      --code: #eef3f8;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.48;
+    }
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 24px 56px;
+    }
+    h1, h2, h3 {
+      line-height: 1.18;
+      margin: 0;
+    }
+    h1 {
+      font-size: 32px;
+      margin-bottom: 8px;
+    }
+    h2 {
+      font-size: 22px;
+      margin-top: 34px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+    h3 {
+      font-size: 17px;
+      margin-top: 22px;
+    }
+    p {
+      margin: 10px 0;
+    }
+    ul, ol {
+      margin-top: 8px;
+      padding-left: 22px;
+    }
+    li {
+      margin: 5px 0;
+    }
+    code {
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.93em;
+    }
+    pre {
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 12px;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      margin: 12px 0 22px;
+      border: 1px solid var(--line);
+    }
+    th, td {
+      vertical-align: top;
+      text-align: left;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    th {
+      color: var(--muted);
+      font-weight: 650;
+      background: #f0f4f8;
+    }
+    .lede {
+      color: var(--muted);
+      font-size: 16px;
+      margin-bottom: 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px 18px;
+      margin: 16px 0;
+    }
+    .path {
+      word-break: break-all;
+      color: var(--accent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+    .muted {
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>HiVA Duration Pipeline Knowledge Transfer</h1>
+  <p class="lede">
+    This note documents how the duration labels were created, where the relabeled duration/gripper/PCF
+    information is saved, and which scripts are currently used for replay generation, finetuning, and evaluation.
+    Generated for handoff on 2026-05-01.
+  </p>
+
+  <div class="panel">
+    <h3>One-Sentence Summary</h3>
+    <p>
+      The duration sidecar adds one frame-aligned label row per LIBERO dataset frame; each final label
+      is the horizon-safe minimum of a gripper-switch label from command/qpos signals and a pure-contact
+      label from saved MuJoCo gripper-object contact metadata.
+    </p>
+  </div>
+
+  <h2>Primary Data Artifacts</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>Purpose</th>
+        <th>Important Contents</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="path">/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys</td>
+        <td>Base LeRobot LIBERO dataset used on bigtoken/bigcornea.</td>
+        <td>Frame-indexed dataset with observations, state, actions, language/task metadata, videos, and meta files.</td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys/meta/purecontact_pcf.json</td>
+        <td>Saved pure-contact-frame metadata.</td>
+        <td>
+          Contains <code>episodes</code> entries for 148 episodes with fields such as <code>pcf</code>,
+          <code>contact_interval</code>, <code>case_category</code>, <code>purecontact_keyword</code>,
+          <code>purecontact_verb</code>, <code>reset_mode</code>, and <code>seed</code>.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_duration_sidecar_all_episodes.parquet</td>
+        <td>Frame-aligned duration sidecar consumed by duration-SmolVLA training/eval.</td>
+        <td>
+          273,465 rows, one per base dataset frame, across 1,693 episodes. Includes final duration labels,
+          switch-derived labels, PCF-derived labels, gripper switch metadata, and pure-contact metadata.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_duration_sidecar_all_episodes.summary.json</td>
+        <td>Generation summary for the all-episode sidecar.</td>
+        <td>Records selected episodes, row counts, label histograms, phase histograms, and PCF annotation count.</td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_duration_sidecar_d6_10_15_all_episodes.parquet</td>
+        <td>Current full-coefficient HiVA duration sidecar.</td>
+        <td>
+          Recomputed horizon-safe dense labels for <code>{6,10,15}</code>, not remapped from older labels.
+          It has 273,465 rows across 1,693 episodes with duration histogram:
+          <code>6:165,627</code>, <code>10:47,849</code>, <code>15:59,989</code>.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_duration_sidecar_d6_10_15_all_episodes.summary.json</td>
+        <td>Summary for the current <code>{6,10,15}</code> duration sidecar.</td>
+        <td>Records selected episodes, row counts, duration histograms, phase histograms, PCF metadata, and labeler configuration.</td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_hiva_coeff_sidecar_d6_10_15_k6_all_episodes.parquet</td>
+        <td>Current full-coefficient HiVA coefficient sidecar.</td>
+        <td>
+          Stores cubic <code>K=6</code>, degree-3 B-spline coefficients for translation, command-space cumulative
+          rotation, and absolute gripper command. It has 273,465 valid rows, 10,089 terminal-hold rows,
+          and 263,376 real-tail rows.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_hiva_coeff_sidecar_d6_10_15_k6_all_episodes.summary.json</td>
+        <td>Summary for the current coefficient sidecar.</td>
+        <td>Records <code>K=6</code>, <code>degree=3</code>, <code>Dmax=15</code>, coefficient statistics, terminal-hold counts, and top high-error fitting windows.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Training Action Semantics</h2>
+  <p>
+    The LIBERO LeRobot dataset stores each action target as a 7-D float32 vector. The dataset metadata names
+    this feature generically as <code>actions</code> with shape <code>[7]</code>, and the local LIBERO wrapper
+    exposes a 7-D action space bounded by <code>[-1, 1]</code>. In our finetuning, replay, and evaluation scripts
+    we run LIBERO with <code>--env.control_mode=relative</code>, so the simulator controller interprets the pose
+    part of the action as relative commands rather than absolute end-effector targets.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Action Slice</th>
+        <th>Meaning</th>
+        <th>Important Caveat</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>action[0:3]</code></td>
+        <td>Relative Cartesian translation command, commonly read as <code>dx, dy, dz</code>.</td>
+        <td>This is a delta command to the controller, not an absolute world position.</td>
+      </tr>
+      <tr>
+        <td><code>action[3:6]</code></td>
+        <td>Relative 3-D orientation command.</td>
+        <td>
+          It is safe to describe this as a relative rotation delta. Be careful calling it literal
+          pitch/yaw/roll unless the lower-level robosuite controller convention is being discussed explicitly;
+          for this pipeline, the important fact is that it is not an absolute orientation target.
+        </td>
+      </tr>
+      <tr>
+        <td><code>action[6]</code></td>
+        <td>Continuous gripper command in <code>[-1, 1]</code>.</td>
+        <td>
+          This is treated as an absolute command signal, not a delta. In the sidecar logic, positive values
+          above threshold mean close, negative values below threshold mean open, and near-zero values hold the
+          previous command-side gripper state.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    So the short answer is: yes, the training action is relative translation, relative rotation, and an absolute
+    continuous gripper command. The one wording correction is that the rotation should be documented as a
+    relative 3-D orientation delta, not necessarily as literal Euler pitch/yaw/roll. During model training the
+    action tensor may be normalized by LeRobot preprocessing/statistics, but semantically the target remains this
+    same 7-D LIBERO controller command. SmolVLA predicts future chunks of these commands, for example 50 future
+    actions when <code>chunk_size=50</code>.
+  </p>
+  <p>
+    This distinction matters for duration labels: gripper switch labels are derived from the final action
+    dimension together with observed gripper <code>qpos</code>, while the translation and rotation dimensions are
+    not used directly to define the gripper-switch duration target.
+  </p>
+
+  <h2>Rotation Coefficient Labels</h2>
+  <h3>Current Coefficient Sidecar Setting</h3>
+  <p>
+    The current full-coefficient HiVA dataset-preparation setting uses duration set
+    <code>{6, 10, 15}</code>, fixed cubic B-splines with <code>K=6</code> control coefficients,
+    degree <code>p=3</code>, and <code>Dmax=15</code>. The fixed-shape coefficient fields are:
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Field</th>
+        <th>Shape / Meaning</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>hiva_theta_tr_raw</code></td>
+        <td><code>[6,3]</code> raw translation B-spline coefficients</td>
+      </tr>
+      <tr>
+        <td><code>hiva_theta_rot_raw</code></td>
+        <td><code>[6,3]</code> raw command-space cumulative rotation B-spline coefficients</td>
+      </tr>
+      <tr>
+        <td><code>hiva_theta_grip_raw</code></td>
+        <td><code>[6,1]</code> raw absolute gripper B-spline coefficients</td>
+      </tr>
+      <tr>
+        <td><code>hiva_P_tr_hold_raw</code></td>
+        <td><code>[15,3]</code> hold-padded cumulative translation target</td>
+      </tr>
+      <tr>
+        <td><code>hiva_rho_rot_hold_raw</code></td>
+        <td><code>[15,3]</code> hold-padded cumulative command-space rotation vector target</td>
+      </tr>
+      <tr>
+        <td><code>hiva_G_grip_hold_raw</code></td>
+        <td><code>[15,1]</code> hold-padded absolute gripper command target</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Chosen Method: Command-Space Cumulative Rotation</h3>
+  <p>
+    For a HiVA rotation coefficient head that must decode back into executable LIBERO actions, use command-space
+    cumulative rotation targets. The raw LIBERO rotation command is <code>action[3:6]</code>. In the OSC_POSE
+    controller configuration, raw values in <code>[-1, 1]</code> are scaled to axis-angle radians by
+    <code>delta_rotvec = 0.5 * action[3:6]</code>.
+  </p>
+  <p>
+    For a segment starting at frame <code>s</code> with duration <code>d</code>, define:
+  </p>
+  <pre><code>DeltaR_{s+tau-1} = Exp(0.5 * action_{s+tau-1}[3:6])
+C(0) = I
+C(tau) = C(tau-1) @ DeltaR_{s+tau-1}
+y_rot(tau) = Log(C(tau))</code></pre>
+  <p>
+    Fit cubic B-spline coefficients to the cumulative command-space rotation vectors:
+  </p>
+  <pre><code>coef, *_ = np.linalg.lstsq(Phi, y_rot, rcond=None)</code></pre>
+  <p>
+    At inference, predicted coefficients are decoded into cumulative rotations and then converted back to per-step
+    raw LIBERO rotation actions by SO(3) differencing:
+  </p>
+  <pre><code>y_hat = Phi @ coef_pred
+C_hat[tau] = Exp(y_hat[tau])
+DeltaR_hat[tau] = inv(C_hat[tau-1]) @ C_hat[tau]
+delta_rotvec[tau] = Log(DeltaR_hat[tau])
+raw_action_rot[tau] = delta_rotvec[tau] / 0.5</code></pre>
+  <p>
+    Do not recover rotation deltas by simple subtraction of adjacent rotation vectors. Rotations compose on SO(3),
+    so the per-step command must come from <code>inv(C_hat[tau-1]) @ C_hat[tau]</code>.
+  </p>
+  <pre><code class="language-python">from scipy.spatial.transform import Rotation as R
+import numpy as np
+
+OSC_ROT_SCALE = 0.5
+
+def command_space_cumulative_rotvec(action_chunk):
+    C = R.identity()
+    y = []
+    for raw in action_chunk[:, 3:6]:
+        dR = R.from_rotvec(OSC_ROT_SCALE * np.clip(raw, -1.0, 1.0))
+        C = C * dR
+        y.append(C.as_rotvec())
+    return np.asarray(y)
+
+def fit_rotation_coeff(action_chunk, Phi):
+    y = command_space_cumulative_rotvec(action_chunk)
+    coef, *_ = np.linalg.lstsq(Phi, y, rcond=None)
+    return coef
+
+def decode_rotation_coeff(coef, Phi):
+    y_hat = Phi @ coef
+    raw = []
+    prev = R.identity()
+    for cur in R.from_rotvec(y_hat):
+        dR = prev.inv() * cur
+        raw.append(dR.as_rotvec() / OSC_ROT_SCALE)
+        prev = cur
+    return np.asarray(raw)</code></pre>
+
+  <h3>Nonzero Command-Space Sample Checks</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Sample</th>
+        <th>Original Rotation Magnitude</th>
+        <th>Decoded-vs-Original Raw Action Error</th>
+        <th>Interpretation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>episode=3, start_frame=23, duration=8, task=2</code></td>
+        <td><code>max_abs(action[3:6]) = 0.3482</code></td>
+        <td><code>RMSE = 0.00357</code>, <code>max_abs_diff = 0.00830</code></td>
+        <td>Command-space cumulative B-spline decodes back to raw rotation actions closely.</td>
+      </tr>
+      <tr>
+        <td><code>episode=34, start_frame=352, duration=8, task=2</code></td>
+        <td><code>max_abs(action[3:6]) = 0.3750</code></td>
+        <td><code>RMSE = 0.00159</code>, <code>max_abs_diff = 0.00346</code></td>
+        <td>Another high-rotation case with close raw-action reconstruction.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Alternative: Chunk-Start Quaternion / Observed EEF Rotation</h3>
+  <p>
+    The observed EEF method uses the realized end-effector orientation instead of the raw controller command. With
+    observed quaternions, the label is:
+  </p>
+  <pre><code>q_rel(tau) = quat_distance(q_{s+tau-1}, q_{s-1})
+y_obs(tau) = quat2axisangle(q_rel(tau))</code></pre>
+  <p>
+    In the current LeRobot LIBERO dataset, this can be implemented from <code>observation.state</code>, whose layout is
+    <code>eef_pos(3) + eef_axisangle(3) + gripper_qpos(2)</code>:
+  </p>
+  <pre><code class="language-python">abs_rotvec = states[:, 3:6]      # frames s-1, s, ..., s+d-1
+R_start = R.from_rotvec(abs_rotvec[0])
+R_abs = R.from_rotvec(abs_rotvec[1:])
+y_obs = (R_abs * R_start.inv()).as_rotvec()</code></pre>
+  <p>
+    This is geometrically accurate for the motion that actually happened, including controller tracking, interpolation,
+    dynamics, contact, and simulator response. It is not a good target if the coefficient head must decode directly
+    to raw LIBERO <code>action[3:6]</code>. On the nonzero sample
+    <code>episode=34, start_frame=352, duration=8, task=2</code>, the observed-EEF B-spline fit had excellent cumulative
+    state reconstruction error, <code>1.37e-4</code> radians per component, but decoding it back to raw LIBERO rotation
+    actions gave <code>RMSE = 0.1630</code> and <code>max_abs_diff = 0.2930</code> versus the original
+    <code>action[3:6]</code>.
+  </p>
+  <p>
+    Therefore, the current recommendation is: use command-space cumulative rotation for the executable HiVA rotation
+    coefficient head; keep the chunk-start quaternion / observed EEF method for diagnostics or for a separate
+    state-trajectory prediction target.
+  </p>
+
+  <h2>Duration Label Semantics</h2>
+  <h3>Classes</h3>
+  <ul>
+    <li><code>duration_label=6</code>: shortest always-valid fallback horizon.</li>
+    <li><code>duration_label=10</code>: medium horizon, valid in approach-safe regions.</li>
+    <li><code>duration_label=15</code>: longest horizon, used when the model is safely away from switch/contact regions.</li>
+    <li><code>duration_class</code>: class index mapping <code>6 -> 0</code>, <code>10 -> 1</code>, <code>15 -> 2</code>.</li>
+  </ul>
+  <p>
+    When the duration set changes, the horizon-safe dense labels must be recomputed with the new set.
+    Do not remap older <code>{1,3,8}</code> or pilot <code>{4,8,12}</code> labels into
+    <code>{6,10,15}</code>; the valid-duration regions depend directly on the candidate durations.
+  </p>
+
+  <h3>Final Label Formula</h3>
+  <p>
+    For each frame, the sidecar stores three related duration labels:
+  </p>
+  <ul>
+    <li><code>duration_label_s</code>: switch/qpos-derived horizon-safe duration label.</li>
+    <li><code>duration_label_p</code>: pure-contact-derived horizon-safe duration label.</li>
+    <li><code>duration_label</code>: final training label, computed as <code>min(duration_label_s, duration_label_p)</code>.</li>
+  </ul>
+  <p>
+    This makes PCF annotations a conservative override: if pure-contact metadata says a frame is near a contact event,
+    it can shorten the horizon even when the gripper-switch label alone would allow a longer duration.
+  </p>
+
+  <h3>Current {6,10,15} Distribution</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Column</th>
+        <th>Label 6</th>
+        <th>Label 10</th>
+        <th>Label 15</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>duration_label</code> final</td>
+        <td>165,627</td>
+        <td>47,849</td>
+        <td>59,989</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Observed Label Distribution</h3>
+  <p>
+    The table below records the older duration-only <code>{1,3,8}</code> sidecar distribution for provenance.
+    Use the <code>{6,10,15}</code> distribution above for the current full-coefficient HiVA dataset preparation.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Column</th>
+        <th>Old Label 1</th>
+        <th>Old Label 3</th>
+        <th>Old Label 8</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>duration_label</code> final</td>
+        <td>139,244</td>
+        <td>74,232</td>
+        <td>59,989</td>
+      </tr>
+      <tr>
+        <td><code>duration_label_s</code> switch/qpos</td>
+        <td>135,364</td>
+        <td>72,117</td>
+        <td>65,984</td>
+      </tr>
+      <tr>
+        <td><code>duration_label_p</code> pure contact</td>
+        <td>4,736</td>
+        <td>4,098</td>
+        <td>264,631</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>How Gripper Switch Labels Are Created</h2>
+  <p>
+    The gripper-switch side of the labeler is implemented in
+    <span class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_duration_sidecar.py</span>.
+  </p>
+  <ol>
+    <li>
+      Read each episode from the LeRobot parquet dataset with columns such as <code>index</code>,
+      <code>episode_index</code>, <code>frame_index</code>, <code>task_index</code>, <code>action</code>,
+      <code>observation.state</code>, and <code>timestamp</code>.
+    </li>
+    <li>
+      Convert the final action dimension into a command-side close/open state:
+      positive values above a small threshold mean close, negative values mean open, and near-zero values hold
+      the previous state.
+    </li>
+    <li>
+      Convert the final two state dimensions into measured gripper width; estimate an observed qpos open/closed
+      state using percentile-based hysteresis thresholds plus fixed LIBERO-friendly clamps.
+    </li>
+    <li>
+      Detect command switches and qpos switches as state changes. Same-type switches are merged within
+      <code>merge_window=3</code> frames.
+    </li>
+    <li>
+      Pair command and qpos switches monotonically within <code>match_window=20</code> frames. The dynamic-programming
+      pairing maximizes the number of valid pairs and then minimizes total frame distance.
+    </li>
+    <li>
+      Recover one-sided detections into valid switch zones when possible. For unmatched command switches, the qpos
+      endpoint is estimated by the later frame closest to the relevant qpos threshold. For unmatched qpos switches,
+      a command frame is synthesized three frames earlier.
+    </li>
+      <li>
+        For each frame, compute a frame context relative to valid switch zones and assign a horizon-safe label from
+        the requested duration set. For the current full-coefficient sidecar this set is <code>{6, 10, 15}</code>,
+        where <code>6</code> is the always-valid fallback, <code>10</code> is used in approach-safe regions, and
+        <code>15</code> is used in center/free regions.
+      </li>
+  </ol>
+  <p>
+    <code>dist_to_switch</code> is zero inside a valid switch zone. Otherwise, it is the minimum frame distance to
+    a valid command or qpos switch endpoint. It is independent of PCF distance.
+  </p>
+
+  <h2>How Pure-Contact Metadata Is Created</h2>
+  <p>
+    Pure-contact frame detection is implemented by
+    <span class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/detect_pure_contact_pcf_replays.py</span>.
+    The refresh wrapper is
+    <span class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/update_purecontact_pcf_metadata.sh</span>.
+  </p>
+  <p>
+    The detector uses language/task filtering to identify candidate pure-contact tasks, replays expert actions in
+    LIBERO/MuJoCo, checks gripper-object contacts, and verifies the contact using target joint/object movement gates.
+    The PCF is the contact onset frame that passes these checks.
+  </p>
+  <ul>
+    <li><code>pcf</code>: detected pure-contact frame.</li>
+    <li><code>contact_interval</code>: contiguous contact interval beginning at the PCF.</li>
+    <li><code>case_category</code>: pure-contact case grouping.</li>
+    <li><code>purecontact_keyword</code> and <code>purecontact_verb</code>: target object and manipulation verb.</li>
+    <li><code>reset_mode</code> and <code>seed</code>: replay initialization metadata needed to reproduce the detection.</li>
+    <li><code>movement_window</code>, <code>movement_threshold</code>, <code>same_sign_k</code>: verification parameters.</li>
+  </ul>
+
+  <h3>Saved PCF File</h3>
+  <p>
+    The canonical PCF file for bigcornea/bigtoken is:
+  </p>
+  <pre>/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys/meta/purecontact_pcf.json</pre>
+  <p>
+    The saved JSON says it is intended to avoid recomputing MuJoCo contacts unless PCF metadata is being refreshed.
+    Current count: 148 episodes with PCF annotations.
+  </p>
+
+  <h2>Sidecar Columns To Know</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Column</th>
+        <th>Meaning</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>dataset_index</code></td><td>Global LeRobot frame/sample index.</td></tr>
+      <tr><td><code>episode_index</code>, <code>frame_index</code>, <code>task_index</code></td><td>Dataset episode, frame, and task identifiers.</td></tr>
+      <tr><td><code>duration_label</code>, <code>duration_class</code></td><td>Final duration target used for training.</td></tr>
+      <tr><td><code>duration_label_s</code>, <code>duration_class_s</code></td><td>Switch/qpos-derived duration target.</td></tr>
+      <tr><td><code>duration_label_p</code>, <code>duration_class_p</code></td><td>Pure-contact-derived duration target.</td></tr>
+      <tr><td><code>phase</code></td><td>One of <code>free_motion</code>, <code>approach</code>, <code>near_target</code>.</td></tr>
+      <tr><td><code>cmd_switch</code>, <code>qpos_switch</code></td><td>Whether this frame is a matched valid command/qpos switch endpoint.</td></tr>
+      <tr><td><code>inside_switch_zone</code></td><td>Whether the frame lies inside a paired/recovered gripper switch zone.</td></tr>
+      <tr><td><code>prev_switch_end</code>, <code>next_switch_start</code></td><td>Switch-zone context used by the horizon-safe labeler.</td></tr>
+      <tr><td><code>pcf_frame</code>, <code>is_pcf</code></td><td>Saved pure-contact frame and per-frame indicator.</td></tr>
+      <tr><td><code>dist_to_pure_contact</code></td><td>Frame distance to the saved PCF, or episode length when no PCF exists.</td></tr>
+      <tr><td><code>purecontact_* </code></td><td>PCF metadata copied from <code>purecontact_pcf.json</code>.</td></tr>
+      <tr><td><code>labeler_version</code></td><td>Version string used when generating the sidecar.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Key Script Map</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>Role</th>
+        <th>Summary</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_duration_sidecar.py</td>
+        <td>Sidecar builder</td>
+        <td>Reads the base LeRobot dataset, derives gripper command/qpos switch zones, loads optional PCF annotations, and writes the frame-aligned duration sidecar. The <code>--durations</code> argument recomputes horizon-safe labels for the requested set.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_coeff_sidecar.py</td>
+        <td>Coefficient sidecar builder</td>
+        <td>Fits cubic B-spline coefficients for translation, command-space cumulative rotation, and absolute gripper. Current dataset-prep command uses <code>--source-durations 6,10,15</code>, <code>--target-durations 6,10,15</code>, <code>--k 6</code>, and <code>--degree 3</code>.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_duration_sidecar_all_bigflow.sh</td>
+        <td>All-episode sidecar launcher</td>
+        <td>Documents and runs the all-episode sidecar command. The original defaults point to bigflow paths; override <code>DATA_ROOT</code>, <code>OUTPUT</code>, and <code>SUMMARY_JSON</code> for another server.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/detect_pure_contact_pcf_replays.py</td>
+        <td>PCF detection and replay video generator</td>
+        <td>Either detects PCF from MuJoCo contact plus motion verification or loads saved PCF metadata to render representative replays with overlays.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/update_purecontact_pcf_metadata.sh</td>
+        <td>PCF refresh wrapper</td>
+        <td>Runs PCF detection in <code>--pcf-source detect</code> mode and writes/refreshes <code>meta/purecontact_pcf.json</code>. Defaults originally point to bigbrain paths.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/generate_saved_pcf_replays.sh</td>
+        <td>Saved-PCF replay wrapper</td>
+        <td>Runs the detector in <code>--pcf-source saved</code> mode to render replay videos from existing PCF JSON without recomputing contacts.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/replay_hiva_duration_in_libero.py</td>
+        <td>Duration replay visualizer</td>
+        <td>Replays dataset actions or decoded HiVA coefficient actions in LIBERO and overlays duration label, switch distance, PCF, pure-contact metadata, and final <code>SC</code>/<code>FA</code> status.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigcornea/finetune_bigcornea_ckpt_20k_d.sh</td>
+        <td>Bigcornea duration finetuning</td>
+        <td>Runs duration-SmolVLA finetuning with automatic step scaling, W&B options, eval disabled by default, and sidecar input.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/finetune_bigflow_ckpt_20k_d.sh</td>
+        <td>Bigflow duration finetuning</td>
+        <td>Same pattern as bigcornea, with bigflow paths and defaults. The clean/noisy wrapper below overrides duration loss weights.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/finetune_bigflow_ckpt_20k_d_clean_noisy.sh</td>
+        <td>Clean-plus-noisy duration loss ablation</td>
+        <td>Uses <code>duration_loss_weight=0.05</code>, <code>duration_noisy_loss_weight=0.01</code>, and <code>duration_noisy_sigma=0.25</code>, then delegates to the base bigflow finetune script.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/common_wandb.sh</td>
+        <td>Shared W&B shell helper</td>
+        <td>Adds opt-in <code>WANDB_ENABLE</code>, <code>WANDB_PROJECT</code>, <code>WANDB_ENTITY</code>, <code>WANDB_MODE</code>, <code>WANDB_DISABLE_ARTIFACT</code>, and <code>WANDB_NOTES</code> support.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigtoken/eval_duration_overlay_bigtoken.sh</td>
+        <td>Bigtoken duration overlay evaluation</td>
+        <td>Generates LIBERO eval videos with <code>D=&lt;duration&gt; INF=&lt;inference calls&gt;</code> overlay. Defaults to 2 episodes from task id 0 in each suite.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigtoken/eval_duration_overlay_two_ckpts_bigtoken.sh</td>
+        <td>Two-checkpoint bigtoken overlay sweep</td>
+        <td>Runs the overlay video script for the bigcornea step-reduced checkpoint and the bigflow full-step checkpoint.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigtoken/eval_full_two_checkpoints_bigtoken.sh</td>
+        <td>Bigtoken sequential benchmark eval</td>
+        <td>Runs larger LIBERO evaluation sweeps for two checkpoints with overlay metrics saved to JSON summaries.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigtoken/eval_original_bigcornea_s2_s4_50eps_bigtoken.sh</td>
+        <td>Bigtoken S2/S4 comparison eval</td>
+        <td>Runs requested evaluation sweeps for bigcornea step-reduction checkpoints on GPU subsets.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>How To Rebuild Or Refresh</h2>
+  <h3>Refresh PCF Metadata</h3>
+  <pre>DATA_ROOT=/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys \
+PURECONTACT_PCF_JSON=/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys/meta/purecontact_pcf.json \
+OUTPUT_DIR=/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/duration_replay/purecontact_pcf_recomputed \
+bash /home/jongwoopark/lerobot/src/lerobot/scripts/update_purecontact_pcf_metadata.sh</pre>
+
+  <h3>Rebuild The All-Episode Duration Sidecar</h3>
+  <pre>PYTHONPATH=/home/jongwoopark/lerobot/src \
+/home/jongwoopark/miniconda3/envs/smolvla_libero/bin/python \
+  -m lerobot.scripts.build_hiva_duration_sidecar \
+  --dataset.repo-id local/libero_lerobot_v3_lerobotkeys \
+  --dataset.root /nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys \
+  --durations 6,10,15 \
+  --output /nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_duration_sidecar_d6_10_15_all_episodes.parquet \
+  --summary-json /nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_duration_sidecar_d6_10_15_all_episodes.summary.json \
+  --labeler-version hiva_duration_d6_10_15_all_episodes_v1</pre>
+
+  <h3>Build The All-Episode Coefficient Sidecar</h3>
+  <pre>PYTHONPATH=/home/jongwoopark/lerobot/src \
+/home/jongwoopark/miniconda3/envs/smolvla_libero/bin/python \
+  -m lerobot.scripts.build_hiva_coeff_sidecar \
+  --dataset-root /nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys \
+  --duration-sidecar /nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_duration_sidecar_d6_10_15_all_episodes.parquet \
+  --output /nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_hiva_coeff_sidecar_d6_10_15_k6_all_episodes.parquet \
+  --summary-output /nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_hiva_coeff_sidecar_d6_10_15_k6_all_episodes.summary.json \
+  --source-durations 6,10,15 \
+  --target-durations 6,10,15 \
+  --k 6 \
+  --degree 3 \
+  --hiva-labeler-version hiva_coeff_d6_10_15_k6_all_episodes_v1</pre>
+
+  <h3>Generate Saved-PCF Replay Videos</h3>
+  <pre>DATA_ROOT=/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys \
+PURECONTACT_PCF_JSON=/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/libero_lerobot_v3_lerobotkeys/meta/purecontact_pcf.json \
+OUTPUT_DIR=/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/duration_replay/purecontact_pcf_replays_saved \
+VIDEOS_PER_COMBO=10 \
+bash /home/jongwoopark/lerobot/src/lerobot/scripts/generate_saved_pcf_replays.sh</pre>
+
+  <h3>Run Duration Finetuning On Bigcornea</h3>
+  <pre>GPU_IDS=0,1,2,3,4,5,6,7 \
+NUM_GPUS=8 \
+BATCH_PER_GPU=48 \
+S=8 \
+WANDB_ENABLE=true \
+WANDB_PROJECT=lerobot \
+bash /home/jongwoopark/lerobot/server_scripts/bigcornea/finetune_bigcornea_ckpt_20k_d.sh</pre>
+
+  <h3>Generate Bigtoken Overlay Eval Videos</h3>
+  <pre>GPU_IDS=0,1,2,3 \
+N_EPISODES=2 \
+EVAL_BATCH_SIZE=1 \
+bash /home/jongwoopark/lerobot/server_scripts/bigtoken/eval_duration_overlay_two_ckpts_bigtoken.sh</pre>
+
+  <h2>Finetuning Notes</h2>
+  <ul>
+    <li>Offline finetuning does not need LIBERO/MuJoCo simulation construction when <code>EVAL_FREQ=0</code>.</li>
+    <li>The duration sidecar does not create extra training samples. It adds labels to the existing frame-indexed LeRobot samples.</li>
+    <li>SmolVLA uses <code>chunk_size=50</code>; each frame sample contains current observation/state/text and a future action chunk. A 100-frame episode contributes about 100 samples, with future actions padded/clamped near the episode end.</li>
+    <li>The recent memory optimization uses one VLM prefix forward and two action-expert suffix forwards for duration training when prefix-cache reuse is enabled.</li>
+    <li>For the clean-plus-noisy ablation, the clean duration loss uses <code>duration_loss_weight</code>; the noisy duration loss uses <code>duration_noisy_loss_weight</code>.</li>
+  </ul>
+
+  <h2>Evaluation Notes</h2>
+  <ul>
+    <li>The overlay is implemented inside <span class="path">src/lerobot/scripts/lerobot_eval.py</span>.</li>
+    <li>When <code>policy.config.use_duration_head</code> is true, each rendered frame is annotated with <code>D=&lt;last execution horizon&gt; INF=&lt;duration inference count&gt;</code>.</li>
+    <li>For bigtoken, the overlay script overrides <code>--policy.duration_sidecar_path</code> to the bigcornea NFS sidecar path, because checkpoints may remember the original training server path in their config.</li>
+  </ul>
+
+  <h2>Decoded Coefficient Replay Notes</h2>
+  <p>
+    Raw-action replay executes the saved dataset action at every environment step. Decoded HiVA replay also steps
+    the environment once per frame, but the action stream is built by greedy macro segments. At segment start
+    frame <code>t</code>, the script reads <code>duration_label=d</code>, decodes exactly <code>d</code> actions from
+    the coefficient row at frame <code>t</code>, fills <code>episode_actions[t:t+d]</code>, and jumps to
+    <code>t+d</code>. It does not decode every dense frame window and execute all overlapping windows.
+  </p>
+  <p>
+    This explains episode <code>539</code>: a dense diagnostic at frame <code>23</code> showed a large overlapping-window
+    rotation max action diff of about <code>3.281</code>, but greedy replay did not use frame 23 as a segment start.
+    The frame lies inside the segment that started at frame 15. The generated decoded replay used
+    <code>22</code> segments, had <code>mean_segment_rmse_vs_dataset=0.00203</code>,
+    <code>max_segment_abs_diff_vs_dataset=0.07743</code>, and succeeded with <code>SC</code>.
+  </p>
+  <pre>/nfs/bigcornea.cs.stonybrook.edu/add_disk2/jongwoopark/duration_replay/hiva_coeff_d6_10_15_k6_ep539_decoded/episode_0539_task9_replay.mp4</pre>
+
+  <h2>Current Important Output Locations</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>Meaning</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/outputs/train/smolvla_hiva_duration_token_bigcornea_full_s8_20260430_152419/checkpoints/last/pretrained_model</td>
+        <td>Bigcornea duration-SmolVLA checkpoint trained with step reduction <code>S=8</code>.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/outputs/train/smolvla_hiva_duration_token_bigflow_full_b32_20260429_rerun/checkpoints/last/pretrained_model</td>
+        <td>Bigflow full-step duration-SmolVLA checkpoint.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/outputs/eval/duration_overlay_bigtoken_bigcornea_s8_step_reduced_*</td>
+        <td>Bigtoken overlay eval videos for the bigcornea S=8 checkpoint.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/outputs/eval/duration_overlay_bigtoken_bigflow_fullstep_b32_rerun_*</td>
+        <td>Bigtoken overlay eval videos for the bigflow full-step checkpoint.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Sanity Checks</h2>
+  <ul>
+    <li>Sidecar row count should match base frame count: 273,465 rows for the current all-episode dataset.</li>
+    <li><code>is_pcf=1</code> should occur once per PCF-annotated episode: 148 rows for the current PCF JSON.</li>
+    <li>Current coefficient-sidecar duration labels should only be in <code>{6, 10, 15}</code>; duration classes should only be in <code>{0, 1, 2}</code>.</li>
+    <li>Coefficient sidecar rows should report <code>hiva_k=6</code>, <code>hiva_degree=3</code>, and <code>hiva_dmax=15</code>.</li>
+    <li>Training scripts should print <code>EVAL_FREQ=0</code> unless in-training simulation evaluation is intentionally enabled.</li>
+    <li>Evaluation scripts should print the sidecar path they use, especially when checkpoints were trained on another server.</li>
+  </ul>
+</main>
+</body>
+</html>

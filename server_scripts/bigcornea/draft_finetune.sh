@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+source "${REPO_ROOT}/server_scripts/common_wandb.sh"
 
 LOG_DIR="${REPO_ROOT}/outputs/train_logs"
 mkdir -p "${LOG_DIR}"
@@ -115,6 +116,7 @@ mkdir -p "${HF_DATASETS_CACHE}"
 
 RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigcornea_auto_$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
+build_wandb_args
 
 # Compute global batch sizes.
 GLOBAL_BATCH_SIZE=$((NUM_GPUS * BATCH_PER_GPU))
@@ -155,12 +157,13 @@ PY
 # Decay until the end of training by default.
 SCHEDULER_DECAY_STEPS="${SCHEDULER_DECAY_STEPS:-${STEPS}}"
 
-# Save every 20% of training by default.
+# Save near the midpoint and at the end of training by default.
 SAVE_FREQ="${SAVE_FREQ:-$(python - <<PY
 steps = int("${STEPS}")
 
-# Save 5 checkpoints across training, with a minimum interval of 1.
-print(max(1, steps // 5))
+# The train loop always saves the final checkpoint, so ceil(steps / 2) gives
+# one midpoint-ish checkpoint plus the final checkpoint, even for odd steps.
+print(max(1, (steps + 1) // 2))
 PY
 )}"
 
@@ -182,6 +185,7 @@ echo "SAVE_FREQ=${SAVE_FREQ}"
 echo "SCHEDULER_WARMUP_STEPS=${SCHEDULER_WARMUP_STEPS}"
 echo "SCHEDULER_DECAY_STEPS=${SCHEDULER_DECAY_STEPS}"
 echo "SCHEDULER_DECAY_LR=${SCHEDULER_DECAY_LR}"
+print_wandb_config
 echo "ACCELERATE_BIN=${ACCELERATE_BIN}"
 echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
 
@@ -223,4 +227,5 @@ echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
   --job_name="${RUN_NAME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
-  --eval_freq="${EVAL_FREQ:-0}"
+  --eval_freq="${EVAL_FREQ:-0}" \
+  "${WANDB_ARGS[@]}"

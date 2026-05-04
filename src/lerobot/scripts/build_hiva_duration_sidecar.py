@@ -44,6 +44,17 @@ def parse_int_ranges(spec: str | None) -> list[int]:
     return sorted(set(values))
 
 
+def parse_int_tuple(spec: str) -> tuple[int, ...]:
+    values = tuple(int(x.strip()) for x in spec.split(",") if x.strip())
+    if not values:
+        raise ValueError("Expected at least one integer duration")
+    if tuple(sorted(values)) != values:
+        raise ValueError(f"Durations must be sorted ascending, got {values}")
+    if len(set(values)) != len(values):
+        raise ValueError(f"Durations must be unique, got {values}")
+    return values
+
+
 @dataclass(frozen=True)
 class SwitchZone:
     pair_index: int
@@ -482,10 +493,11 @@ def frame_context_for_time(s: int, switch_zones: list[SwitchZone], T: int) -> Fr
     )
 
 
-def violates_phase_rule(
+def duration_is_horizon_safe(
     s: int,
     d: int,
     *,
+    durations: tuple[int, ...],
     prev_e: int | None,
     next_e: int | None,
     has_prev_zone: bool,
@@ -499,8 +511,10 @@ def violates_phase_rule(
     We use the end of the previous valid interaction zone as e_i and the start of the
     next valid interaction zone as e_{i+1}. For the start-of-trajectory case where no
     previous zone exists, we keep the left side open so early free-space frames can
-    still receive duration 8 when safe.
+    still receive the longest duration when safe.
     """
+    shortest = min(durations)
+    longest = max(durations)
     near_left = has_prev_zone and prev_e is not None and (prev_e <= s < prev_e + W1)
     has_right_limit = has_next_zone and next_e is not None
     near_right = has_right_limit and (next_e - W1 <= s < next_e)
@@ -509,18 +523,38 @@ def violates_phase_rule(
     center_start = (prev_e + W1 + W3) if (has_prev_zone and prev_e is not None) else 0
     center_end = (next_e - W1 - W3) if has_right_limit else None
     in_center = center_start <= s and (center_end is None or s < center_end)
+    right_safe = (not has_right_limit) or (s + d <= next_e - W1)
 
-    if d == 1:
-        return False
+    if d == shortest:
+        return True
 
-    if d == 3:
-        return near_zone or (has_right_limit and (s + 3 > next_e - W1))
+    if d == longest:
+        return in_center and right_safe
 
-    if d == 8:
-        right_safe = (not has_right_limit) or (s + 8 <= next_e - W1)
-        return not (in_center and right_safe)
+    return (not near_zone) and right_safe
 
-    raise ValueError(f"Unsupported duration: {d}")
+def violates_phase_rule(
+    s: int,
+    d: int,
+    *,
+    prev_e: int | None,
+    next_e: int | None,
+    has_prev_zone: bool,
+    has_next_zone: bool,
+    W1: int,
+    W3: int,
+) -> bool:
+    return not duration_is_horizon_safe(
+        s,
+        d,
+        durations=DURATIONS,
+        prev_e=prev_e,
+        next_e=next_e,
+        has_prev_zone=has_prev_zone,
+        has_next_zone=has_next_zone,
+        W1=W1,
+        W3=W3,
+    )
 
 
 def horizon_safe_duration_label(
@@ -533,7 +567,7 @@ def horizon_safe_duration_label(
     durations: tuple[int, ...] = DURATIONS,
 ) -> int:
     if context.inside_zone:
-        return 1
+        return min(durations)
 
     prev_e = context.prev_switch_end
     next_e = context.next_switch_start
@@ -541,9 +575,10 @@ def horizon_safe_duration_label(
     valid = [
         d
         for d in durations
-        if not violates_phase_rule(
+        if duration_is_horizon_safe(
             s,
             d,
+            durations=durations,
             prev_e=prev_e,
             next_e=next_e,
             has_prev_zone=context.has_prev_zone,
@@ -552,7 +587,7 @@ def horizon_safe_duration_label(
             W3=W3,
         )
     ]
-    return max(valid) if valid else 1
+    return max(valid) if valid else min(durations)
 
 
 def classify_phase(
@@ -563,6 +598,7 @@ def classify_phase(
     T: int,
     W1: int,
     W3: int,
+    durations: tuple[int, ...] = DURATIONS,
 ) -> str:
     if context.inside_zone:
         return "near_target"
@@ -587,8 +623,9 @@ def classify_phase(
     )
     has_right_limit = context.has_next_zone and context.next_switch_start is not None
     center_end = (context.next_switch_start - W1 - W3) if has_right_limit else None
-    right_safe = (not has_right_limit) or (s + 8 <= context.next_switch_start - W1)
-    if center_start <= s and (center_end is None or s < center_end) and right_safe and duration_label == 8:
+    longest = max(durations)
+    right_safe = (not has_right_limit) or (s + longest <= context.next_switch_start - W1)
+    if center_start <= s and (center_end is None or s < center_end) and right_safe and duration_label == longest:
         return "free_motion"
 
     return "approach"
@@ -662,10 +699,12 @@ def pcf_duration_labels(
     pcf_frames: list[int],
     W1: int,
     W3: int,
+    durations: tuple[int, ...],
+    duration_to_class: dict[int, int],
 ) -> tuple[np.ndarray, np.ndarray, list[FrameContext]]:
     if not pcf_frames:
-        duration_labels = np.full(T, max(DURATIONS), dtype=np.int64)
-        duration_classes = np.array([DURATION_TO_CLASS[int(d)] for d in duration_labels], dtype=np.int64)
+        duration_labels = np.full(T, max(durations), dtype=np.int64)
+        duration_classes = np.array([duration_to_class[int(d)] for d in duration_labels], dtype=np.int64)
         contexts = [frame_context_for_time(s, [], T) for s in range(T)]
         return duration_labels, duration_classes, contexts
 
@@ -679,12 +718,13 @@ def pcf_duration_labels(
                 T=T,
                 W1=W1,
                 W3=W3,
+                durations=durations,
             )
             for s in range(T)
         ],
         dtype=np.int64,
     )
-    duration_classes = np.array([DURATION_TO_CLASS[int(d)] for d in duration_labels], dtype=np.int64)
+    duration_classes = np.array([duration_to_class[int(d)] for d in duration_labels], dtype=np.int64)
     return duration_labels, duration_classes, contexts
 
 
@@ -702,6 +742,8 @@ def detect_switch_zones_and_labels(
     W3: int,
     merge_window: int,
     match_window: int,
+    durations: tuple[int, ...],
+    duration_to_class: dict[int, int],
 ) -> EpisodeLabels:
     T = len(actions)
     close_cmd = command_state_from_libero_action(actions)
@@ -738,12 +780,13 @@ def detect_switch_zones_and_labels(
                 T=T,
                 W1=W1,
                 W3=W3,
+                durations=durations,
             )
             for s in range(T)
         ],
         dtype=np.int64,
     )
-    duration_classes = np.array([DURATION_TO_CLASS[int(d)] for d in duration_labels], dtype=np.int64)
+    duration_classes = np.array([duration_to_class[int(d)] for d in duration_labels], dtype=np.int64)
 
     phases = [
         classify_phase(
@@ -753,6 +796,7 @@ def detect_switch_zones_and_labels(
             T=T,
             W1=W1,
             W3=W3,
+            durations=durations,
         )
         for s in range(T)
     ]
@@ -788,10 +832,12 @@ def build_sidecar_rows(
     merge_window: int,
     match_window: int,
     labeler_version: str,
+    durations: tuple[int, ...] = DURATIONS,
     purecontact_annotations: dict[int, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows_out: list[dict[str, Any]] = []
     episode_summaries: list[dict[str, Any]] = []
+    duration_to_class = {int(d): i for i, d in enumerate(durations)}
 
     overall_duration_hist: Counter[str] = Counter()
     overall_duration_s_hist: Counter[str] = Counter()
@@ -815,6 +861,8 @@ def build_sidecar_rows(
             W3=W3,
             merge_window=merge_window,
             match_window=match_window,
+            durations=durations,
+            duration_to_class=duration_to_class,
         )
 
         matched_cmd_frames = {zone.cmd_frame for zone in labels.switch_zones}
@@ -829,9 +877,11 @@ def build_sidecar_rows(
             pcf_frames=pcf_frames,
             W1=W1,
             W3=W3,
+            durations=durations,
+            duration_to_class=duration_to_class,
         )
         duration_labels_final = np.minimum(labels.duration_labels, duration_labels_p)
-        duration_classes_final = np.array([DURATION_TO_CLASS[int(d)] for d in duration_labels_final], dtype=np.int64)
+        duration_classes_final = np.array([duration_to_class[int(d)] for d in duration_labels_final], dtype=np.int64)
 
         duration_hist = Counter(int(x) for x in duration_labels_final.tolist())
         duration_s_hist = Counter(int(x) for x in labels.duration_labels.tolist())
@@ -948,6 +998,8 @@ def build_sidecar_rows(
         "episode_indices": [int(ep) for ep in episode_indices],
         "W1": int(W1),
         "W3": int(W3),
+        "durations": [int(d) for d in durations],
+        "duration_to_class": {str(k): int(v) for k, v in duration_to_class.items()},
         "merge_window": int(merge_window),
         "match_window": int(match_window),
         "purecontact_annotation_count": int(len(purecontact_annotations)),
@@ -996,6 +1048,7 @@ def main() -> None:
     parser.add_argument("--max-episodes", type=int, default=None)
     parser.add_argument("--w1", type=int, default=DEFAULT_W1)
     parser.add_argument("--w3", type=int, default=DEFAULT_W3)
+    parser.add_argument("--durations", type=str, default=",".join(str(d) for d in DURATIONS))
     parser.add_argument("--merge-window", type=int, default=DEFAULT_MERGE_WINDOW)
     parser.add_argument("--match-window", type=int, default=DEFAULT_MATCH_WINDOW)
     parser.add_argument("--labeler-version", type=str, default="hiva_duration_v9")
@@ -1029,6 +1082,7 @@ def main() -> None:
         merge_window=args.merge_window,
         match_window=args.match_window,
         labeler_version=args.labeler_version,
+        durations=parse_int_tuple(args.durations),
         purecontact_annotations=purecontact_annotations,
     )
     write_rows(rows, args.output)
@@ -1036,7 +1090,8 @@ def main() -> None:
 
     print(
         f"Wrote {len(rows)} rows from {len(selected_episodes)} episodes to {args.output}. "
-        f"W1={args.w1}, W3={args.w3}, merge_window={args.merge_window}, match_window={args.match_window}"
+        f"W1={args.w1}, W3={args.w3}, durations={args.durations}, "
+        f"merge_window={args.merge_window}, match_window={args.match_window}"
     )
     if args.summary_json is not None:
         print(f"Wrote summary JSON to {args.summary_json}")
