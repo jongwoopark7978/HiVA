@@ -40,7 +40,7 @@ The idea of using temporally extended actions is closely related to hierarchical
 \paragraph{Smooth and compact action representations.}
 Another line of work studies action representations that are smoother or more compact than raw per-step action sequences. Diffusion policies and action-chunking transformers model multi-step action sequences directly, but they often operate in the raw action space and therefore inherit issues such as intra-chunk jitter, inter-chunk discontinuity, or sensitivity to the chosen horizon \cite{act2023,diffusionpolicy2023,aac2026,abpolicy2026}. Function-space representations address this issue by parameterizing trajectories with compact bases. BEAST encodes action sequences into B-spline tokens, showing that B-spline representations can compress action chunks and generate smooth high-frequency control signals efficiently \cite{beast2025}. ABPolicy predicts continuous B-spline control points with a flow-matching policy and uses asynchronous refitting to improve real-time smoothness and inter-chunk continuity \cite{abpolicy2026}. 
 
-HiVA builds on this evidence but uses B-splines differently. We relabel the training dataset into macro-actions and train the model to learn the duration within which a B-spline code can accurately approximate the underlying micro-action sequence. Thus, the duration is not merely an inference-time heuristic; it is a supervised prediction target coupled to the compact trajectory code. We also avoid forcing all action dimensions into a single homogeneous representation. Translation and rotation are treated as separate smooth cumulative trajectories with different B-spline coefficient heads, while the gripper is modeled as a sparse event process with a discrete event-based token. This separation matches the geometry of the action space: end-effector translation and rotation are naturally smooth, whereas gripper commands are usually discontinuous open--close events.
+HiVA builds on this evidence but uses B-splines differently. We relabel the training dataset into macro-actions and train the model to learn the duration within which a B-spline code can accurately approximate the underlying micro-action sequence. Thus, the duration is not merely an inference-time heuristic; it is a supervised prediction target coupled to the compact trajectory code. We also avoid forcing all action dimensions into a single homogeneous representation. Translation and rotation are treated as separate smooth cumulative trajectories with B-spline coefficient heads, while the gripper is represented as B-spline coefficients over the native continuous absolute command. This keeps the first coding path homogeneous across action modalities, while a sparse event-based gripper head remains a secondary ablation.
 
 \paragraph{Denoising-based VLA action experts.}
 Recent VLAs increasingly use dedicated action experts that condition diffusion or flow-matching policies on multimodal visual-language features \cite{smolvla2025,vpp2024,aac2026}. SmolVLA is a compact 0.45B VLA with a flow-matching action expert designed for efficient robotics, while VPP is a larger 1.5B-scale policy that conditions a diffusion policy on predictive visual representations from video modeling \cite{smolvla2025,vpp2024}. HiVA is designed for this modular setting. Rather than replacing the pretrained multimodal conditioner or the main denoising transformer block, it changes the action-side interface: fixed raw-action tokens and heads are replaced with duration, translation-coefficient, rotation-coefficient, and gripper heads. This makes HiVA a hierarchical variable-horizon action representation that can be tested across different denoising VLA backbones and model scales.
@@ -59,11 +59,11 @@ Recent VLAs increasingly use dedicated action experts that condition diffusion o
 
 \section{Method}
 \subsection{Overview}
-We replace direct micro-action generation with a macro-to-micro action expert. In general, a micro-action can be any robot-dependent native action vector $a_t\in\mathcal{A}\subset\mathbb{R}^{m}$, and a macro action is a duration-conditioned compact code $M_j=(d_j,z_j)$ that is decoded into an approximate variable-length sequence of native micro-actions $\hat a_{j,1:d_j}=\mathcal{D}_{d_j}(z_j)$. In this paper, we instantiate this framework for 7-DoF end-effector control, where $z_j$ is represented by B-spline trajectory coefficients for translation and rotation plus an event-based gripper token. Specifically, for macro token $j$, the expert predicts
+We replace direct micro-action generation with a macro-to-micro action expert. In general, a micro-action can be any robot-dependent native action vector $a_t\in\mathcal{A}\subset\mathbb{R}^{m}$, and a macro action is a duration-conditioned compact code $M_j=(d_j,z_j)$ that is decoded into an approximate variable-length sequence of native micro-actions $\hat a_{j,1:d_j}=\mathcal{D}_{d_j}(z_j)$. In this paper, we instantiate this framework for 7-DoF end-effector control, where $z_j$ is represented by B-spline trajectory coefficients for translation, rotation, and the continuous gripper command. Specifically, for macro token $j$, the expert predicts
 \begin{equation}
-M_j = \bigl(d_j,\,\Theta^{\mathrm{tr}}_j,\,\Theta^{\mathrm{rot}}_j,\,g_j\bigr),
+M_j = \bigl(d_j,\,\Theta^{\mathrm{tr}}_j,\,\Theta^{\mathrm{rot}}_j,\,\Theta^{\mathrm{grip}}_j\bigr),
 \end{equation}
-where $d_j\in\{1,\dots,D_{\max}\}$ is a discrete duration, $\Theta^{\mathrm{tr}}_j$ are B-spline coefficients for chunk-relative cumulative translation, $\Theta^{\mathrm{rot}}_j$ are B-spline coefficients for chunk-relative cumulative rotation, and $g_j$ is an event-based gripper token. Micro-actions are reconstructed from these macro parameters rather than generated independently. Because the macro action is a lower-dimensional representation of the original micro-action sequence, the B-spline reconstruction is not expected to be exactly identical to the expert trajectory. Instead, it provides a compact approximation whose reconstruction error is explicitly modeled during training. Our dynamic-programming relabeling therefore favors segments that can be represented accurately by the B-spline code while still allowing a controlled approximation loss.
+where $d_j\in\{1,\dots,D_{\max}\}$ is a discrete duration, $\Theta^{\mathrm{tr}}_j$ are B-spline coefficients for chunk-relative cumulative translation, $\Theta^{\mathrm{rot}}_j$ are B-spline coefficients for chunk-relative cumulative rotation, and $\Theta^{\mathrm{grip}}_j$ are B-spline coefficients for the absolute gripper command. Micro-actions are reconstructed from these macro parameters rather than generated independently. Because the macro action is a lower-dimensional representation of the original micro-action sequence, the B-spline reconstruction is not expected to be exactly identical to the expert trajectory. Instead, it provides a compact approximation whose reconstruction error is explicitly modeled during training. Our dynamic-programming relabeling therefore favors segments that can be represented accurately by the B-spline code while still allowing a controlled approximation loss.
 
 \begin{figure*}[t]
     \centering
@@ -81,7 +81,7 @@ where $d_j\in\{1,\dots,D_{\max}\}$ is a discrete duration, $\Theta^{\mathrm{tr}}
     \label{fig:hiva-architecture}
 \end{figure}
 
-\Cref{fig:hiva-architecture} shows how HiVA is inserted into a denoising-based VLA. Instead of asking the action expert to predict a fixed horizon of raw micro-actions, we replace the action-token interface with macro-action tokens: a duration token that determines the number of micro-steps, translation and rotation coefficient tokens that describe smooth cumulative motion, and a gripper token that captures sparse open--close events. The corresponding output heads produce a macro action, and the B-spline basis expands the duration-conditioned coefficients into the final micro-action sequence. This design lets a single macro action represent a meaningful behavioral segment, while still preserving fine-grained translation, rotation, and gripper control inside that segment.
+\Cref{fig:hiva-architecture} shows how HiVA is inserted into a denoising-based VLA. Instead of asking the action expert to predict a fixed horizon of raw micro-actions, we replace the action-token interface with macro-action tokens: a duration token that determines the number of micro-steps, translation and rotation coefficient tokens that describe smooth cumulative motion, and gripper coefficient tokens that describe the continuous absolute gripper command. The corresponding output heads produce a macro action, and the B-spline basis expands the duration-conditioned coefficients into the final micro-action sequence. This design lets a single macro action represent a meaningful behavioral segment, while still preserving fine-grained translation, rotation, and gripper control inside that segment.
 
 To make the approach easy to integrate into existing denoising-based VLAs, we only change a small number of lightweight layers and heads outside the main denoising transformer block in the action expert. Specifically, as summarized in \cref{fig:hiva-architecture}, we keep the pretrained multimodal conditioning path and the main denoising transformer intact, and replace only the early action-side projection layers and the output heads. We instantiate this design in SmolVLA and VPP \cite{smolvla2025,vpp2024}. In both cases, the raw fixed-horizon action interface is replaced by duration, coefficient, and gripper heads while the main pretrained denoising transformer remains unchanged.
 
@@ -96,7 +96,13 @@ where $\hat P_j(\tau)$ is the cumulative translation from the start of the chunk
 \end{equation}
 where $\hat R_j(\tau)$ is the cumulative rotation vector relative to the chunk start.
 
-The gripper is represented separately as a binary event process. We use one gripper token per macro action and predict an event type $e_j\in\{\texttt{hold},\texttt{flip}\}$ together with an optional switch time $\tau_j\in\{1,\dots,D_{\max}\}$. This separation is intentional: translation and rotation are smooth geometric trajectories, while the gripper sequence is sparse and event-like.
+The gripper is represented with B-spline coefficients over the native continuous command. In LIBERO-style end-effector control, the final action dimension is an absolute command $g_t\in[-1,1]$ rather than a delta. Therefore we do not integrate or cumulative-sum gripper values. For duration $d_j$, let $\Phi^{\mathrm{grip}}_{d_j}\in\mathbb{R}^{d_j\times K_g}$ denote the gripper basis. The decoded gripper sequence is
+\begin{equation}
+\hat G_j=\Phi^{\mathrm{grip}}_{d_j}\Theta_j^{\mathrm{grip}},
+\qquad
+\hat G_j(\tau)\in[-1,1].
+\end{equation}
+The first coding experiments use the same cubic basis for translation, rotation, and gripper so the implementation has one coefficient-token pattern. A binary event/switch-time gripper head remains a secondary Plan-B design.
 
 \subsection{Joint duration reasoning with a denoising action expert}
 Duration and coefficients are reasoned jointly by the same transformer block, but they use different output types. The duration token is supervised with a bounded discrete head over $\{1,\dots,D_{\max}\}$, while coefficient tokens are optimized with a continuous denoising objective, instantiated as flow matching or diffusion denoising depending on the host action expert. This design lets duration and coefficients interact through self-attention without forcing a discrete variable into the same continuous objective.
@@ -117,13 +123,12 @@ L_j =\;& \lambda_{\mathrm{dur}}L_{\mathrm{dur},j}
 + \lambda_{\mathrm{den}}^{\mathrm{rot}}L_{\mathrm{den},j}^{\mathrm{rot}}
 + \lambda_{\mathrm{path}}^{\mathrm{rot}}L_{\mathrm{path},j}^{\mathrm{rot}} \nonumber\\
 &+ \lambda_{\mathrm{tail}}^{\mathrm{rot}}L_{\mathrm{tail},j}^{\mathrm{rot}}
-+ \lambda_{\mathrm{evt}}L_{\mathrm{evt},j}
-+ \lambda_{\mathrm{time}}L_{\mathrm{time},j} \nonumber\\
++ \lambda_{\mathrm{den}}^{\mathrm{grip}}L_{\mathrm{den},j}^{\mathrm{grip}} \nonumber\\
 &+ \lambda_{\mathrm{path}}^{\mathrm{grip}}L_{\mathrm{path},j}^{\mathrm{grip}}
 + \lambda_{\mathrm{tail}}^{\mathrm{grip}}L_{\mathrm{tail},j}^{\mathrm{grip}}.
 \label{eq:total-loss-main}
 \end{align}
-Here $L_{\mathrm{dur}}$ supervises the duration categorical distribution, $L_{\mathrm{den}}^{\mathrm{tr}}$ and $L_{\mathrm{den}}^{\mathrm{rot}}$ are the native denoising objectives on translation and rotation coefficients, $L_{\mathrm{path}}$ and $L_{\mathrm{tail}}$ measure reconstruction error on the valid chunk prefix and the hold-padded suffix, and the gripper losses supervise event type, switch time, and the reconstructed binary gripper state. Detailed definitions are provided in the appendix.
+Here $L_{\mathrm{dur}}$ supervises the duration categorical distribution. The denoising losses $L_{\mathrm{den}}^{\mathrm{tr}}$, $L_{\mathrm{den}}^{\mathrm{rot}}$, and $L_{\mathrm{den}}^{\mathrm{grip}}$ supervise translation, rotation, and gripper coefficients in the host continuous denoising objective. The path and tail losses measure decoded reconstruction error on the valid chunk prefix and the hold-padded suffix. Detailed definitions and simplified pilot variants are provided in the appendix.
 
 \section{Training Dataset and Evaluation Benchmarks}
 \subsection{Training dataset construction}
@@ -134,15 +139,30 @@ C_{s,d} = \gamma + \alpha E_{s,d} + \beta R^{\mathrm{evt}}_{s,d},
 \end{equation}
 where $E_{s,d}$ is a B-spline fit error and $R^{\mathrm{evt}}_{s,d}$ is an event-proximity risk.
 
-For a candidate segment, we construct chunk-relative cumulative translation and rotation targets from the expert trajectory. Let $p_t$ and $q_t$ denote the observed end-effector position and quaternion at micro-step $t$. Then the cumulative translation target for local index $\tau\in\{1,\dots,d\}$ is
+For a candidate segment, we construct chunk-relative cumulative translation and rotation targets in the native command space of the expert trajectory. In LIBERO, the raw action is
 \begin{equation}
-P^{\star}_{s,d}(\tau) = p_{s+\tau-1} - p_{s-1},
+a_t = [\Delta x_t,\Delta y_t,\Delta z_t,
+       \Delta r^x_t,\Delta r^y_t,\Delta r^z_t,g_t],
 \end{equation}
-and the cumulative rotation target is written abstractly as
+where the first three entries are relative translation commands, the next three entries are relative rotation-vector commands, and $g_t$ is an absolute continuous gripper command. The cumulative translation target for local index $\tau\in\{1,\dots,d\}$ is
 \begin{equation}
-R^{\star}_{s,d}(\tau) = f_{\mathrm{quat\to axis}}\!\left(q_{s+\tau-1}, q_{s-1}\right),
+P^{\star}_{s,d}(\tau) = \sum_{m=1}^{\tau}a^\star_{s+m-1}[0:3].
 \end{equation}
-where $f_{\mathrm{quat\to axis}}$ denotes the benchmark-provided conversion from the boundary quaternions to a chunk-relative axis-angle vector; the LIBERO-Plus instantiation is given in the appendix. A cubic B-spline is then fit to each candidate segment by regularized least squares, and the fit error is computed from the resulting reconstruction error.
+The cumulative rotation target is obtained by composing the commanded rotation-vector deltas in $SO(3)$. If $\eta$ is the controller scale from raw action units to radians, $\eta=0.5$ for the LIBERO OSC\_POSE configuration used here, then
+\begin{equation}
+\mathcal{R}_{s,d}^{\star}(0)=I,
+\qquad
+\mathcal{R}_{s,d}^{\star}(\tau)=
+\mathcal{R}_{s,d}^{\star}(\tau-1)
+\operatorname{Exp}\!\left(\eta\,a^\star_{s+\tau-1}[3:6]\right),
+\end{equation}
+with
+\begin{equation}
+R^{\star}_{s,d}(\tau)=
+\operatorname{Log}\!\left(\mathcal{R}_{s,d}^{\star}(\tau)\right)
+\in\mathbb{R}^3.
+\end{equation}
+Thus the spline is fit to cumulative command-space axis vectors, and native relative rotation-vector actions are recovered at decode time by adjacent $SO(3)$ differences. The gripper target is the original absolute command sequence, not a cumulative sum. A cubic B-spline is then fit to each candidate segment by regularized least squares, and the fit error is computed from the resulting reconstruction error.
 
 To discourage macro-actions from crossing delicate event boundaries, we define a per-step event risk. Let $e_i$ and $e_{i+1}$ denote two consecutive gripper event times, and let $L_i=e_{i+1}-e_i$. For a micro-step $u$ with $e_i\le u < e_{i+1}$, we define a normalized pre-event term
 \begin{equation}
@@ -195,17 +215,69 @@ The main comparisons are against the original raw-action experts of the host arc
 \label{app:training-objective}
 This appendix expands the compact loss in \cref{eq:total-loss-main}. Throughout the appendix, $D_{\max}$ is the maximum macro duration and $K$ is the number of spline basis functions.
 
-\subsection{LIBERO-Plus cumulative rotation labels}
+
+\subsection{Command-space cumulative axis-vector rotation labels}
 \label{app:liberoplus-rotation}
-In the LeRobot LIBERO-Plus environment, the chunk-relative cumulative rotation target can be instantiated with the benchmark-provided quaternion utilities. Let $q_t$ denote the observed end-effector quaternion at micro-step $t$. For a candidate segment $(s,d)$ and local index $\tau\in\{1,\dots,d\}$, we define the relative quaternion
+The implementation does not use observed end-effector quaternion displacement as the primary rotation label. That diagnostic target was geometrically meaningful as a state trajectory, but it introduced a large gap between the original LIBERO rotation-vector command sequence and the rotation deltas reconstructed from fitted B-spline coefficients. HiVA therefore uses \emph{command-space cumulative rotation}: the spline is fit to cumulative axis vectors obtained by composing the native relative rotation-vector action commands.
+
+Let the raw LIBERO action be
 \begin{equation}
-q^{\mathrm{rel}}_{s,d}(\tau)=\operatorname{quat\_distance}(q_{s+\tau-1},q_{s-1}),
+a_t = [\Delta x_t,\Delta y_t,\Delta z_t,
+       \Delta r^x_t,\Delta r^y_t,\Delta r^z_t,g_t],
 \end{equation}
-and convert it to a rotation vector by
+where $a_t[3:6]$ is a relative rotation-vector command and $g_t\in[-1,1]$ is an absolute gripper command. Let $\eta>0$ denote the controller scale from raw action units to radians; in the current LIBERO OSC\_POSE setup we use $\eta=0.5$. For a candidate segment starting at frame $s$, define
 \begin{equation}
-R^{\star}_{s,d}(\tau)=\operatorname{quat2axisangle}\bigl(q^{\mathrm{rel}}_{s,d}(\tau)\bigr).
+\Delta R_{s+\tau-1}^{\star}
+=
+\operatorname{Exp}\!\left(\eta\,a^\star_{s+\tau-1}[3:6]\right),
+\qquad
+\tau=1,\ldots,d.
 \end{equation}
-This is the LIBERO-Plus instantiation of the abstract mapping $f_{\mathrm{quat\to axis}}$ used in the main text.
+The cumulative command-space rotation is composed on $SO(3)$:
+\begin{equation}
+\mathcal{R}_{s}^{\star}(0)=I,
+\qquad
+\mathcal{R}_{s}^{\star}(\tau)=
+\mathcal{R}_{s}^{\star}(\tau-1)
+\Delta R_{s+\tau-1}^{\star}.
+\end{equation}
+The cumulative axis-vector label used for B-spline fitting is
+\begin{equation}
+\rho_s^{\star}(\tau)=
+\operatorname{Log}\!\left(\mathcal{R}_{s}^{\star}(\tau)\right)
+\in\mathbb{R}^3,
+\qquad
+\tau=1,\ldots,d.
+\end{equation}
+For a duration-specific basis $\Phi_d$, the offline coefficient target solves
+\begin{equation}
+\Theta_{s,\mathrm{rot}}^{\star}
+=
+\arg\min_{\Theta\in\mathbb{R}^{K\times3}}
+\left\|\Phi_d\Theta-\rho_s^{\star}\right\|_2^2
++\lambda_{\mathrm{ridge}}\|\Theta\|_F^2.
+\end{equation}
+For the canonical hold-pad experiment in \cref{app:exp-hp-hiva}, the same cumulative axis-vector prefix is first hold-padded to $D_{\max}$ and then fit with the single canonical basis $\Phi_{D_{\max}}$.
+
+At inference, the model predicts raw rotation coefficients $\hat\Theta^{\mathrm{rot}}$ after coefficient unnormalization. A basis matrix $\Phi$ decodes cumulative axis vectors
+\begin{equation}
+\hat\rho(\tau)=\Phi(\tau,:)\hat\Theta^{\mathrm{rot}}.
+\end{equation}
+These cumulative axis vectors are converted back to native relative rotation-vector actions by adjacent differences on $SO(3)$:
+\begin{equation}
+\hat{\mathcal{R}}(\tau)=\operatorname{Exp}\!\left(\hat\rho(\tau)\right),
+\qquad
+\Delta\hat{\mathcal{R}}(\tau)=
+\hat{\mathcal{R}}(\tau-1)^{-1}\hat{\mathcal{R}}(\tau),
+\end{equation}
+with $\hat{\mathcal{R}}(0)=I$. The reconstructed native LIBERO rotation-vector command is
+\begin{equation}
+\hat a^{\mathrm{rot}}_{s+\tau-1}
+=
+\frac{1}{\eta}
+\operatorname{Log}\!\left(\Delta\hat{\mathcal{R}}(\tau)\right).
+\end{equation}
+This construction makes the fitted target and the executed action live in the same command space. The only approximation is the B-spline reconstruction error, not an implicit inversion of observed controller dynamics.
 
 \subsection{Duration loss}
 Let the duration token produce logits
@@ -307,7 +379,7 @@ L_{\mathrm{den},j}^{\mathrm{tr}} =
 \end{equation}
 with the analogous rotation objective.
 
-\subsection{Gripper heads and reconstruction}
+\subsection{Plan-B gripper event heads and reconstruction}
 We use a binary gripper event space $\{\texttt{hold},\texttt{flip}\}$. Let the gripper token produce event logits
 \begin{equation}
 z_j^{\mathrm{evt}} = W_{\mathrm{evt}}h_j^{\mathrm{grip}} \in \mathbb{R}^{2},
@@ -382,8 +454,7 @@ L_j =\;& \lambda_{\mathrm{dur}}L_{\mathrm{dur},j}
 &+ \lambda_{\mathrm{den}}^{\mathrm{rot}}L_{\mathrm{den},j}^{\mathrm{rot}}
 + \lambda_{\mathrm{path}}^{\mathrm{rot}}L_{\mathrm{path},j}^{\mathrm{rot}} \nonumber\\
 &+ \lambda_{\mathrm{tail}}^{\mathrm{rot}}L_{\mathrm{tail},j}^{\mathrm{rot}}
-+ \lambda_{\mathrm{evt}}L_{\mathrm{evt},j}
-+ \lambda_{\mathrm{time}}L_{\mathrm{time},j} \nonumber\\
++ \lambda_{\mathrm{den}}^{\mathrm{grip}}L_{\mathrm{den},j}^{\mathrm{grip}} \nonumber\\
 &+ \lambda_{\mathrm{path}}^{\mathrm{grip}}L_{\mathrm{path},j}^{\mathrm{grip}}
 + \lambda_{\mathrm{tail}}^{\mathrm{grip}}L_{\mathrm{tail},j}^{\mathrm{grip}}.
 \end{align}
@@ -521,89 +592,99 @@ L_{\text{FM-action}}\!\left(\bar A_s,\; \widetilde A_s^{\star}\right)
 \end{equation}
 This loss lets the FM action objective supervise a translation sequence whose first $D_{\max}$ tokens are reconstructed through the soft duration-aware coefficient branch, while the tail from $D_{\max}+1$ to $N$ remains the native SmolVLA raw prediction. During inference, a single macro is predicted, $\hat d_s=\arg\max_{d\in\mathcal{D}}\pi_s(d)$, the first $\hat d_s$ assembled actions are executed, and the policy then re-observes. For execution, the first $\hat d_s$ translation actions come from the coefficient branch, while rotation and gripper come from the regular raw action head.
 
+
 \subsection{Experiment 3: one-macro full-coefficient for translation, rotation, and gripper HiVA}
 \label{app:exp-one-macro-full-coeff}
-The third preliminary experiment replaces the raw SmolVLA action suffix with a fixed-size coefficient suffix. This experiment is intended as the first full-coefficient HiVA-lite implementation that Codex should build. It keeps the pretrained visual-language/state prefix path and the main action-expert transformer, but changes the denoising state from a raw $50\times 7$ action chunk to one macro-level coefficient state. The duration set is
+Experiment 3 is the full one-macro coefficient version that replaces the raw SmolVLA action suffix with a compact coefficient suffix. The experiment keeps the pretrained visual-language/state prefix path and the main action-expert transformer, but changes the denoising state from a raw $50\times7$ action chunk to one duration-conditioned B-spline coefficient state. The current coding target uses
 \begin{equation}
 \mathcal{D}=\{6,10,15\},
-\qquad D_{\max}=15.
+\qquad
+D_{\max}=15,
 \end{equation}
-For translation, rotation, and gripper we use the same cubic B-spline size,
+with a fixed cubic basis for all three action groups,
 \begin{equation}
 K_{\mathrm{tr}}=K_{\mathrm{rot}}=K_{\mathrm{grip}}=6,
-\qquad p_{\mathrm{tr}}=p_{\mathrm{rot}}=p_{\mathrm{grip}}=3.
+\qquad
+p_{\mathrm{tr}}=p_{\mathrm{rot}}=p_{\mathrm{grip}}=3.
 \end{equation}
-Thus every training sample stores fixed-shape coefficient targets
+Thus every training example has fixed coefficient targets
 \begin{equation}
-\Theta_s^{\mathrm{tr},\star}\in\mathbb{R}^{6\times 3},
-\qquad
-\Theta_s^{\mathrm{rot},\star}\in\mathbb{R}^{6\times 3},
-\qquad
-\Theta_s^{\mathrm{grip},\star}\in\mathbb{R}^{6\times 1}.
+\Theta_s^{\mathrm{tr},\star}\in\mathbb{R}^{6\times3},
+\quad
+\Theta_s^{\mathrm{rot},\star}\in\mathbb{R}^{6\times3},
+\quad
+\Theta_s^{\mathrm{grip},\star}\in\mathbb{R}^{6\times1}.
 \end{equation}
-The fixed $K$ choice removes coefficient padding, active-coefficient masks, duration-dependent coefficient dimensions, and duration-specific normalization. The only duration-dependent objects are the B-spline basis rows, the hold-padded basis table, the duration cross-entropy target, and the path/tail masks.
+The fixed-$K$ design intentionally removes the variable-$K$ implementation burden: there is no coefficient padding, no active coefficient mask, no duration-specific coefficient dimensionality, and no duration-specific normalization. Duration still matters through the duration class, the basis row count, the hold-padded basis table, and the number of decoded actions executed before re-observation. If the sidecar is generated from the existing dense duration labels $\{1,3,8\}$, the coding convention is to map $1\mapsto6$, $3\mapsto10$, and $8\mapsto15$, then recompute the class ids over $\{6,10,15\}$.
 
 \paragraph{Action-space convention.}
-This experiment assumes the native LIBERO action format
+The LIBERO action is
 \begin{equation}
-a_t=\bigl[\Delta x_t,\Delta y_t,\Delta z_t,\Delta r^x_t,\Delta r^y_t,\Delta r^z_t,g_t\bigr],
+a_t=[\Delta x_t,\Delta y_t,\Delta z_t,\Delta r^x_t,\Delta r^y_t,\Delta r^z_t,g_t],
 \end{equation}
-where $a_t[0\!:\!3]$ are relative translation deltas, $a_t[3\!:\!6]$ is a relative rotation-vector command, and $g_t=a_t[6]\in[-1,1]$ is an absolute continuous gripper command. Translation and rotation are therefore converted into cumulative command-space labels before spline fitting. The gripper is not cumulative-summed because it is already an absolute command.
+where $a_t[0\!:\!3]$ are relative translation deltas, $a_t[3\!:\!6]$ is a relative rotation-vector command, and $g_t=a_t[6]\in[-1,1]$ is an absolute continuous gripper command. Therefore translation and rotation are converted into cumulative command-space labels before fitting, while gripper is fitted directly as an absolute command sequence. Gripper values are never cumulative-summed.
 
 \subsubsection*{Offline B-spline fitting with fixed $K$}
-For each dense training start $s$, let $d_s^\star\in\{6,10,15\}$ be the duration label. Build an open-uniform clamped cubic B-spline basis
+For each dense start $s$, let $d_s^\star\in\{6,10,15\}$ be the mapped duration. Build an open-uniform clamped cubic basis
 \begin{equation}
-\Phi_{d_s^\star}^{(6,3)}\in\mathbb{R}^{d_s^\star\times 6}.
+\Phi_{d_s^\star}^{(6,3)}\in\mathbb{R}^{d_s^\star\times6}.
 \end{equation}
 The translation cumulative target is
 \begin{equation}
 P_s^\star(\tau)=\sum_{m=1}^{\tau}a_{s+m-1}^{\star}[0\!:\!3],
-\qquad \tau=1,\ldots,d_s^\star.
+\qquad \tau=1,\ldots,d_s^\star,
 \end{equation}
-The translation coefficients are fitted by regularized least squares,
+and the fitted translation coefficient is
 \begin{equation}
 \Theta_s^{\mathrm{tr},\star}
 =\arg\min_{\Theta\in\mathbb{R}^{6\times3}}
 \left\|\Phi_{d_s^\star}^{(6,3)}\Theta-P_s^\star\right\|_2^2
 +\lambda_{\mathrm{ridge}}\|\Theta\|_2^2.
 \end{equation}
-In practice $\lambda_{\mathrm{ridge}}\in[10^{-6},10^{-4}]$ is sufficient.
-
-For rotation, we use the chosen label construction, command-space cumulative rotation. Let $\eta$ denote the LIBERO controller scale that converts the raw rotation-vector command into radians. Define
+For rotation, use command-space cumulative rotation rather than observed end-effector quaternion displacement. Let $\eta$ be the controller scale from raw rotation-vector command units to radians. Define
 \begin{equation}
 R_0=I,
 \qquad
-R_\tau=R_{\tau-1}\operatorname{Exp}\bigl(\eta\,a_{s+\tau-1}^{\star}[3\!:\!6]\bigr),
+R_\tau=R_{\tau-1}\operatorname{Exp}\bigl(\eta a_{s+\tau-1}^{\star}[3\!:\!6]\bigr),
 \end{equation}
-and store the cumulative command-space rotation vector
+and
 \begin{equation}
 \rho_s^\star(\tau)=\operatorname{Log}(R_\tau),
 \qquad \tau=1,\ldots,d_s^\star.
 \end{equation}
-Then
+Then fit
 \begin{equation}
 \Theta_s^{\mathrm{rot},\star}
 =\arg\min_{\Theta\in\mathbb{R}^{6\times3}}
 \left\|\Phi_{d_s^\star}^{(6,3)}\Theta-\rho_s^\star\right\|_2^2
 +\lambda_{\mathrm{ridge}}\|\Theta\|_2^2.
 \end{equation}
-This is preferred over fitting observed end-effector quaternions because the coefficient decoder must recover the original relative rotation-vector commands, not an inverse-controller estimate of realized state motion.
-
-For gripper, the target is the absolute continuous command sequence
+For gripper, fit the same cubic basis directly to the absolute command
 \begin{equation}
-G_s^\star(\tau)=a_{s+\tau-1}^{\star}[6]\in[-1,1],
-\qquad \tau=1,\ldots,d_s^\star.
+G_s^\star(\tau)=a_{s+\tau-1}^{\star}[6],
+\qquad \tau=1,\ldots,d_s^\star,
 \end{equation}
-We fit the same cubic basis directly to $G_s^\star$:
+by
 \begin{equation}
 \Theta_s^{\mathrm{grip},\star}
 =\arg\min_{\Theta\in\mathbb{R}^{6\times1}}
 \left\|\Phi_{d_s^\star}^{(6,3)}\Theta-G_s^\star\right\|_2^2
 +\lambda_{\mathrm{ridge}}\|\Theta\|_2^2.
 \end{equation}
-We do not fit a cumulative gripper curve. A cumulative gripper target can look smoother, but after hold-padding it would finite-difference to zero after the duration, whereas the desired executable behavior is to keep sending the final open/close command. The absolute-gripper fit is also closer to ABPolicy's control-point action-space pattern, where B-spline control points are fitted directly to the action trajectory dimensions \cite{abpolicy2026}.
+The gripper target is not integrated. Although a cumulative gripper curve can appear smoother, it changes the meaning of an absolute open/close command and creates awkward tail behavior after finite differencing. Direct absolute fitting is also closer to the ABPolicy pattern of fitting B-spline control points to the action trajectory dimensions \cite{abpolicy2026}.
 
-The offline sidecar for Experiment 3 should store the following fixed-shape fields:
+\paragraph{Terminal-hold completion near episode end.}
+If only $R<d_s^\star$ real future actions are available near the end of an episode, do not fit to SmolVLA's padded/clamped raw future chunk. Instead, create a valid terminal-hold target of length $d_s^\star$. For $\tau\le R$, use the real expert actions. For $R<\tau\le d_s^\star$, hold cumulative translation fixed, hold cumulative rotation fixed, and hold the final absolute gripper command:
+\begin{equation}
+P_s^\star(\tau)=P_s^\star(R),
+\quad
+\rho_s^\star(\tau)=\rho_s^\star(R),
+\quad
+G_s^\star(\tau)=G_s^\star(R).
+\end{equation}
+This adds no artificial translation or rotation after the demonstration tail and preserves terminal samples that teach the model to finish and hold still. The sidecar should store flags such as \texttt{hiva\_tail\_mode=real} or \texttt{terminal\_hold}, \texttt{hiva\_real\_steps}, and \texttt{hiva\_has\_synthetic\_tail} for diagnostics.
+
+The Experiment 3 sidecar stores fixed-shape raw coefficients and optional decoded targets:
 \begin{center}
 \small
 \begin{tabular}{@{}ll@{}}
@@ -618,22 +699,13 @@ Field & Shape / meaning \\
 \texttt{hiva\_P\_tr\_hold\_raw} & $[15,3]$ hold-padded cumulative translation \\
 \texttt{hiva\_rho\_rot\_hold\_raw} & $[15,3]$ hold-padded cumulative rotation vector \\
 \texttt{hiva\_G\_grip\_hold\_raw} & $[15,1]$ hold-padded absolute gripper command \\
-\texttt{hiva\_valid} & whether the future segment is valid near episode end \\
+\texttt{hiva\_tail\_mode} & \texttt{real} or \texttt{terminal\_hold} \\
 \bottomrule
 \end{tabular}
 \end{center}
-The hold-padded targets use terminal extension:
-\begin{equation}
-\widetilde P_s^\star(\tau)=
-\begin{cases}
-P_s^\star(\tau), & \tau\le d_s^\star,\\
-P_s^\star(d_s^\star), & \tau>d_s^\star,
-\end{cases}
-\end{equation}
-with analogous definitions for $\widetilde\rho_s^\star$ and $\widetilde G_s^\star$. The same terminal-extension rule is used for gripper: after the duration, the command holds the final fitted target value.
 
 \subsubsection*{Coefficient normalization and unnormalization}
-The sidecar should save raw geometric coefficients. Normalization is applied in the dataset wrapper or model forward using dataset-level coefficient statistics computed over the training split only. With fixed $K$, statistics are simple:
+The sidecar saves raw geometric coefficients. Dataset-level coefficient statistics are computed over the training split only:
 \begin{equation}
 \mu_{\mathrm{tr}},\sigma_{\mathrm{tr}}\in\mathbb{R}^{3},
 \quad
@@ -647,65 +719,51 @@ For example,
 \qquad
 \sigma_{\mathrm{tr}}=\operatorname{std}_{s,k}\Theta_s^{\mathrm{tr},\star}(k,:),
 \end{equation}
-and similarly for rotation and gripper. Do not compute statistics per sample or per duration. The normalized coefficient target is
+and analogously for rotation and gripper. Do not compute statistics per sample or per duration. Since $K=6$ is fixed, all six control-point rows are real coefficient rows and no active masks are needed. Normalize by
 \begin{equation}
 \Theta_{s,\mathrm{norm}}^{m,\star}=
 \frac{\Theta_{s,\mathrm{raw}}^{m,\star}-\mu_m}{\sigma_m+\epsilon},
 \qquad m\in\{\mathrm{tr},\mathrm{rot},\mathrm{grip}\}.
 \end{equation}
-At inference, the denoised coefficient is unnormalized before B-spline decoding:
+At inference, unnormalize denoised coefficients before B-spline decoding:
 \begin{equation}
 \hat\Theta_{s,\mathrm{raw}}^m=
 \hat\Theta_{s,\mathrm{norm}}^m(\sigma_m+\epsilon)+\mu_m.
 \end{equation}
-These coefficient statistics are separate from the original SmolVLA action statistics. The coefficient statistics normalize the coefficient flow-matching state; the original ACTION mean/std statistics are used only if the decoded raw LIBERO micro-actions must be converted back to normalized ACTION space before returning through the existing LeRobot action pipeline.
+These coefficient statistics are separate from the original SmolVLA ACTION mean/std statistics. Coefficient statistics normalize the flow-matching state; ACTION statistics are used only to convert decoded raw LIBERO actions back to the normalized output space expected by the existing LeRobot policy pipeline.
 
 \subsubsection*{Coefficient-space flow matching}
-This experiment uses the same time convention as SmolVLA's raw action flow-matching implementation: $t=0$ is clean and $t=1$ is pure noise. For each modality $m\in\{\mathrm{tr},\mathrm{rot},\mathrm{grip}\}$, sample
+The coefficient branch follows the SmolVLA convention where $t=0$ is clean and $t=1$ is pure noise. For each modality $m\in\{\mathrm{tr},\mathrm{rot},\mathrm{grip}\}$,
 \begin{equation}
 \epsilon_m\sim\mathcal{N}(0,I),
 \qquad
-\Theta_{s,t}^m=t\epsilon_m+(1-t)\Theta_{s,\mathrm{norm}}^{m,\star}.
+\Theta_{s,t}^m=t\epsilon_m+(1-t)\Theta_{s,\mathrm{norm}}^{m,\star},
 \end{equation}
-The vector-field target is
+with vector-field target
 \begin{equation}
 u_t^m=\epsilon_m-\Theta_{s,\mathrm{norm}}^{m,\star}.
 \end{equation}
-The action expert receives coefficient tokens projected from $\Theta_{s,t}^{\mathrm{tr}}$, $\Theta_{s,t}^{\mathrm{rot}}$, and $\Theta_{s,t}^{\mathrm{grip}}$, and the output heads predict vector fields
+The model predicts
 \begin{equation}
  v_\theta^{\mathrm{tr}}\in\mathbb{R}^{6\times3},
  \quad
  v_\theta^{\mathrm{rot}}\in\mathbb{R}^{6\times3},
  \quad
- v_\theta^{\mathrm{grip}}\in\mathbb{R}^{6\times1}.
+ v_\theta^{\mathrm{grip}}\in\mathbb{R}^{6\times1},
 \end{equation}
-The coefficient denoising losses are
+and optimizes
 \begin{equation}
 L_{\mathrm{FM}}^m=
-\left\|v_\theta^m-\left(\epsilon_m-\Theta_{s,\mathrm{norm}}^{m,\star}\right)\right\|_2^2,
-\qquad m\in\{\mathrm{tr},\mathrm{rot},\mathrm{grip}\}.
+\left\|v_\theta^m-\left(\epsilon_m-\Theta_{s,\mathrm{norm}}^{m,\star}\right)\right\|_2^2.
 \end{equation}
-Because $K$ is fixed, no active coefficient masks are required for these losses.
+The duration token predicts logits $z_s^{\mathrm{dur}}\in\mathbb{R}^3$ and is supervised by cross-entropy over $\{6,10,15\}$.
 
-The duration token predicts logits
+\subsubsection*{Path and tail losses for the full Experiment 3 objective}
+Experiment 3 keeps the full reconstruction objective available. Since the heads predict vector fields, a clean coefficient estimate can be formed without a full inference ODE by
 \begin{equation}
-z_s^{\mathrm{dur}}\in\mathbb{R}^{3},
-\qquad
-\pi_s=\operatorname{softmax}(z_s^{\mathrm{dur}}),
+\hat\Theta_{s,0}^{m,\mathrm{norm}}=\Theta_{s,t}^m-t v_\theta^m.
 \end{equation}
-and is supervised with
-\begin{equation}
-L_{\mathrm{dur}}=\operatorname{CE}(z_s^{\mathrm{dur}},d_s^\star).
-\end{equation}
-The duration target is the class id corresponding to $d_s^\star\in\{6,10,15\}$. For the first implementation, Codex should train this CE loss on the same noisy coefficient suffix used by the FM losses and may optionally add a clean $t=0$ auxiliary duration pass if duration accuracy is unstable.
-
-\subsubsection*{Path and tail losses from a one-step clean estimate}
-During training the coefficient heads predict vector fields, not clean coefficients. To compute reconstruction losses without running the full inference ODE, recover a one-step clean estimate:
-\begin{equation}
-\hat\Theta_{s,0}^{m,\mathrm{norm}}=
-\Theta_{s,t}^m-t v_\theta^m.
-\end{equation}
-Unnormalize this estimate to raw coefficient space and decode it through a soft duration-aware basis mixture. For each duration $d\in\{6,10,15\}$, define the hold-padded cubic basis
+After unnormalization, decode with the soft duration-aware hold-padded basis mixture. For each $d\in\{6,10,15\}$, construct
 \begin{equation}
 \widetilde\Phi_d^{\mathrm{hold}}\in\mathbb{R}^{15\times6},
 \qquad
@@ -715,103 +773,111 @@ Unnormalize this estimate to raw coefficient space and decode it through a soft 
 \Phi_d^{(6,3)}(d,:), & \tau>d.
 \end{cases}
 \end{equation}
-The soft basis mixture is
-\begin{equation}
-\bar\Phi_s=\sum_{d\in\{6,10,15\}}\pi_s(d)\widetilde\Phi_d^{\mathrm{hold}}.
-\end{equation}
 Then
 \begin{equation}
-\hat P_s=\bar\Phi_s\hat\Theta_{s,0}^{\mathrm{tr},\mathrm{raw}},
-\qquad
-\hat\rho_s=\bar\Phi_s\hat\Theta_{s,0}^{\mathrm{rot},\mathrm{raw}},
-\qquad
-\hat G_s=\bar\Phi_s\hat\Theta_{s,0}^{\mathrm{grip},\mathrm{raw}}.
+\bar\Phi_s=\sum_{d\in\{6,10,15\}}\pi_s(d)\widetilde\Phi_d^{\mathrm{hold}},
 \end{equation}
-The gripper reconstruction is an absolute command curve and is not finite-differenced. Let $M_s(\tau)=\mathbf{1}[\tau\le d_s^\star]$. The path and tail losses are
-\begin{align}
-L_{\mathrm{path}}^{\mathrm{tr}}&=
-\frac{1}{d_s^\star}
-\left\|M_s\odot(\hat P_s-\widetilde P_s^\star)\right\|_1,\\
-L_{\mathrm{tail}}^{\mathrm{tr}}&=
-\frac{1}{\max(1,15-d_s^\star)}
-\left\|(1-M_s)\odot(\hat P_s-\widetilde P_s^\star)\right\|_1,
-\end{align}
-with analogous definitions for $\hat\rho_s$ and $\hat G_s$. Use the unclamped decoded gripper $\hat G_s$ for the training loss. A hard clamp would remove useful gradients when the cubic gripper curve temporarily leaves $[-1,1]$.
+and
+\begin{equation}
+\hat P_s=\bar\Phi_s\hat\Theta_{s,0}^{\mathrm{tr,raw}},
+\quad
+\hat\rho_s=\bar\Phi_s\hat\Theta_{s,0}^{\mathrm{rot,raw}},
+\quad
+\hat G_s=\bar\Phi_s\hat\Theta_{s,0}^{\mathrm{grip,raw}}.
+\end{equation}
+Translation and rotation path/tail losses compare $\hat P_s$ and $\hat\rho_s$ against hold-padded cumulative targets. Gripper path/tail losses compare $\hat G_s$ directly against the hold-padded absolute command. Gripper is not finite-differenced. During inference or action export, clamp only the final decoded raw gripper command to $[-1,1]$; do not clamp the decoded gripper inside the main training loss because hard clamping can block gradients outside the valid range.
 
-The complete Experiment 3 training objective is
-\begin{align}
-L_s^{\mathrm{exp3}}=
-&\;\lambda_{\mathrm{FM}}^{\mathrm{tr}}L_{\mathrm{FM}}^{\mathrm{tr}}
-+\lambda_{\mathrm{FM}}^{\mathrm{rot}}L_{\mathrm{FM}}^{\mathrm{rot}}
-+\lambda_{\mathrm{FM}}^{\mathrm{grip}}L_{\mathrm{FM}}^{\mathrm{grip}}
-+\lambda_{\mathrm{dur}}L_{\mathrm{dur}} \nonumber\\
-&+\lambda_{\mathrm{path}}^{\mathrm{tr}}L_{\mathrm{path}}^{\mathrm{tr}}
-+\lambda_{\mathrm{tail}}^{\mathrm{tr}}L_{\mathrm{tail}}^{\mathrm{tr}}
-+\lambda_{\mathrm{path}}^{\mathrm{rot}}L_{\mathrm{path}}^{\mathrm{rot}}
-+\lambda_{\mathrm{tail}}^{\mathrm{rot}}L_{\mathrm{tail}}^{\mathrm{rot}} \nonumber\\
-&+\lambda_{\mathrm{path}}^{\mathrm{grip}}L_{\mathrm{path}}^{\mathrm{grip}}
-+\lambda_{\mathrm{tail}}^{\mathrm{grip}}L_{\mathrm{tail}}^{\mathrm{grip}}.
-\end{align}
-For the first smoke test, Codex may set the path/tail weights to zero and only log them, then enable them after confirming stable coefficient FM training.
-
-\subsubsection*{Inference decoding and gripper clamp}
-At inference, initialize normalized coefficients from Gaussian noise, integrate the coefficient vector fields for the configured number of SmolVLA steps, unnormalize the final coefficients, and decode with the hard predicted duration $\hat d_s=\arg\max_{d\in\{6,10,15\}}\pi_s(d)$. Translation is finite-differenced:
-\begin{equation}
-\hat a_{s+\tau-1}^{\mathrm{tr}}=
-\hat P_s(\tau)-\hat P_s(\tau-1),
-\qquad \hat P_s(0)=0.
-\end{equation}
-Rotation is decoded by adjacent $SO(3)$ differences:
-\begin{equation}
-\hat R_\tau=\operatorname{Exp}(\hat\rho_s(\tau)),
-\qquad
-\Delta\hat R_\tau=\hat R_{\tau-1}^{-1}\hat R_\tau,
-\qquad
-\hat a_{s+\tau-1}^{\mathrm{rot}}=\operatorname{Log}(\Delta\hat R_\tau)/\eta.
-\end{equation}
-The gripper is used directly as an absolute command:
-\begin{equation}
-\hat a_{s+\tau-1}^{\mathrm{grip}}=\hat G_s(\tau).
-\end{equation}
-Only at inference or action export time do we clamp
-\begin{equation}
-\hat a_{s+\tau-1}^{\mathrm{grip}}\leftarrow
-\operatorname{clip}\left(\hat a_{s+\tau-1}^{\mathrm{grip}},-1,1\right).
-\end{equation}
-If the existing SmolVLA/LeRobot policy output path expects normalized ACTION-space actions, convert the decoded raw LIBERO actions back to normalized ACTION space before returning:
-\begin{equation}
-\hat A_{\mathrm{norm}}=
-\frac{\hat A_{\mathrm{raw}}-\mu_{\mathrm{ACTION}}}{\sigma_{\mathrm{ACTION}}+\epsilon}.
-\end{equation}
-This uses the original dataset-level ACTION statistics, not the coefficient statistics.
-
-\subsubsection*{Coefficient suffix order and attention mask}
+\subsubsection*{Coefficient suffix order and non-causal attention}
 The coefficient suffix is ordered as
 \begin{equation}
-[\texttt{duration}]
-[\texttt{translation\ coeffs}]
-[\texttt{rotation\ coeffs}]
-[\texttt{gripper\ coeffs}].
+[\texttt{duration}]\;[\texttt{translation coeffs}]\;[\texttt{rotation coeffs}]\;[\texttt{gripper coeffs}].
 \end{equation}
-With $K=6$, the suffix length is $1+6+6+6=19$. The original SmolVLA raw-action suffix is causally ordered because raw action tokens correspond to time. In Experiment 3, coefficient tokens are control points and modalities, not temporally ordered micro-actions. Therefore the causal ordering inside the suffix should be removed. Use one bidirectional coefficient-suffix block with attention mask increments
+With $K=6$, the suffix length is $1+6+6+6=19$. Unlike raw SmolVLA action tokens, these coefficient tokens are not temporally ordered micro-actions. Therefore the causal ordering inside the suffix should be removed. Use one bidirectional coefficient-suffix block with mask increments
 \begin{equation}
-[1,0,0,\ldots,0]
+[1,0,0,\ldots,0]\in\{0,1\}^{19}.
 \end{equation}
-for the 19 suffix tokens. Under SmolVLA's cumulative attention-mask construction, this creates a new suffix block that all coefficient tokens share. Prefix/state tokens cannot read suffix tokens, while all suffix tokens can read the prefix/state tokens and can attend bidirectionally to one another.
+This starts a new suffix block after the image/language/state prefix, keeps prefix tokens from attending to coefficient tokens, lets all coefficient tokens attend to the prefix, and lets duration, translation, rotation, and gripper coefficient tokens attend to one another bidirectionally.
 
-\subsubsection*{Codex implementation sketch}
-The following code block is the intended implementation structure, not a drop-in patch. It shows where coefficient normalization, suffix embedding, coefficient FM, path/tail reconstruction, inference decoding, gripper clamping, and final ACTION-space renormalization should happen.
+\subsection{Experiment 4: only flow-matching loss HiVA}
+\label{app:exp-flow-only-hiva}
+Experiment 4 is the first coding target for Codex. It uses the same one-macro coefficient representation as Experiment 3, but disables all decoded path and tail reconstruction losses in the training objective. The goal is to make the initial implementation small and debuggable: first prove that SmolVLA can train and sample a coefficient-space flow model with a duration head, then add decoded reconstruction regularizers later.
+
+The representation is fixed:
+\begin{equation}
+\mathcal{D}=\{6,10,15\},
+\qquad
+D_{\max}=15,
+\qquad
+K=6,
+\qquad
+p=3,
+\end{equation}
+with sidecar targets
+\begin{equation}
+\Theta_s^{\mathrm{tr},\star}\in\mathbb{R}^{6\times3},
+\quad
+\Theta_s^{\mathrm{rot},\star}\in\mathbb{R}^{6\times3},
+\quad
+\Theta_s^{\mathrm{grip},\star}\in\mathbb{R}^{6\times1}.
+\end{equation}
+The offline sidecar, coefficient normalization, terminal-hold completion, coefficient suffix order, and non-causal coefficient-suffix attention mask are identical to Experiment 3.
+
+\subsubsection*{Training objective}
+The only training losses are the three coefficient flow-matching losses and duration cross-entropy:
+\begin{equation}
+L_s^{\mathrm{exp4}}=
+\lambda_{\mathrm{FM}}^{\mathrm{tr}}L_{\mathrm{FM}}^{\mathrm{tr}}
++\lambda_{\mathrm{FM}}^{\mathrm{rot}}L_{\mathrm{FM}}^{\mathrm{rot}}
++\lambda_{\mathrm{FM}}^{\mathrm{grip}}L_{\mathrm{FM}}^{\mathrm{grip}}
++\lambda_{\mathrm{dur}}L_{\mathrm{dur}}.
+\end{equation}
+A good first setting is
+\begin{equation}
+\lambda_{\mathrm{FM}}^{\mathrm{tr}}=1,
+\quad
+\lambda_{\mathrm{FM}}^{\mathrm{rot}}=1,
+\quad
+\lambda_{\mathrm{FM}}^{\mathrm{grip}}\in\{0.5,1\},
+\quad
+\lambda_{\mathrm{dur}}\in\{0.05,0.1\}.
+\end{equation}
+Set all path and tail weights to zero in config. Do not delete the code conceptually; leave the decoded reconstruction metrics as validation-only diagnostics or a later v1 feature.
+
+For each modality,
+\begin{equation}
+\Theta_{s,t}^m=t\epsilon_m+(1-t)\Theta_{s,\mathrm{norm}}^{m,\star},
+\qquad
+u_t^m=\epsilon_m-\Theta_{s,\mathrm{norm}}^{m,\star},
+\end{equation}
+with $m\in\{\mathrm{tr},\mathrm{rot},\mathrm{grip}\}$. The heads predict $v_\theta^m$, and
+\begin{equation}
+L_{\mathrm{FM}}^m=\operatorname{MSE}(v_\theta^m,\nu_t^m).
+\end{equation}
+The duration loss is computed from the same noisy coefficient suffix pass:
+\begin{equation}
+L_{\mathrm{dur}}=\operatorname{CE}(z_s^{\mathrm{dur}}(t),d_s^\star).
+\end{equation}
+If duration accuracy is unstable, add a later clean $t=0$ auxiliary duration pass. That auxiliary should not be part of the first Experiment 4 implementation.
+
+\subsubsection*{Minimal implementation plan}
+Add a configuration flag such as \texttt{use\_hiva\_coeff\_action}. When this flag is false, keep the existing raw SmolVLA action path unchanged. When it is true, branch away from the raw action flow-matching forward and use coefficient-space flow matching.
 
 \begin{lstlisting}[language=Python]
-# configuration_smolvla.py
+# configuration_smolvla.py additions
 use_hiva_coeff_action: bool = False
 hiva_duration_classes: tuple[int, ...] = (6, 10, 15)
 hiva_dmax: int = 15
 hiva_k: int = 6
 hiva_degree: int = 3
 hiva_coef_sidecar_path: str | None = None
+hiva_duration_loss_weight: float = 0.1
+hiva_fm_tr_loss_weight: float = 1.0
+hiva_fm_rot_loss_weight: float = 1.0
+hiva_fm_grip_loss_weight: float = 1.0
+hiva_path_loss_weight: float = 0.0
+hiva_tail_loss_weight: float = 0.0
 
-# Dataset-level coefficient stats from the training coefficient sidecar.
+# coefficient stats, computed from the training coefficient sidecar
 hiva_tr_coef_mean: tuple[float, float, float] = (0.0, 0.0, 0.0)
 hiva_tr_coef_std: tuple[float, float, float] = (1.0, 1.0, 1.0)
 hiva_rot_coef_mean: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -819,145 +885,166 @@ hiva_rot_coef_std: tuple[float, float, float] = (1.0, 1.0, 1.0)
 hiva_grip_coef_mean: tuple[float] = (0.0,)
 hiva_grip_coef_std: tuple[float] = (1.0,)
 
-# Optional, only if the model itself converts raw decoded actions
-# back to normalized ACTION space before returning.
+# original ACTION statistics, used only to convert decoded raw actions
+# back to normalized ACTION space before returning through the policy path
 hiva_action_mean: tuple[float, ...] | None = None
 hiva_action_std: tuple[float, ...] | None = None
+\end{lstlisting}
 
-# modeling_smolvla.py / VLAFlowMatching.__init__
-h = self.vlm_with_expert.expert_hidden_size
+In the policy wrapper, collect coefficient sidecar fields after \texttt{prepare\_action(batch)} and pass them into the model. This mirrors the current duration sidecar pattern, but the raw \texttt{ACTION} tensor is no longer the coefficient denoising target.
+
+\begin{lstlisting}[language=Python]
+# SmolVLAPolicy.forward sketch
+actions = self.prepare_action(batch)
+actions_is_pad = batch.get("action_is_pad")
+
+hiva_targets = None
 if self.config.use_hiva_coeff_action:
-    self.tr_in_proj = nn.Linear(3, h)
-    self.rot_in_proj = nn.Linear(3, h)
-    self.grip_in_proj = nn.Linear(1, h)
-    self.tr_out_proj = nn.Linear(h, 3)
-    self.rot_out_proj = nn.Linear(h, 3)
-    self.grip_out_proj = nn.Linear(h, 1)
-    self.duration_token = nn.Parameter(torch.zeros(1, 1, h))
-    self.duration_head = nn.Linear(h, len(self.config.hiva_duration_classes))
-    self.register_buffer("hiva_basis_hold", self._build_hiva_basis_table(), persistent=False)
-    self.register_buffer("hiva_tr_coef_mean", torch.tensor(self.config.hiva_tr_coef_mean)[None, None, :])
-    self.register_buffer("hiva_tr_coef_std", torch.tensor(self.config.hiva_tr_coef_std)[None, None, :])
-    self.register_buffer("hiva_rot_coef_mean", torch.tensor(self.config.hiva_rot_coef_mean)[None, None, :])
-    self.register_buffer("hiva_rot_coef_std", torch.tensor(self.config.hiva_rot_coef_std)[None, None, :])
-    self.register_buffer("hiva_grip_coef_mean", torch.tensor(self.config.hiva_grip_coef_mean)[None, None, :])
-    self.register_buffer("hiva_grip_coef_std", torch.tensor(self.config.hiva_grip_coef_std)[None, None, :])
+    hiva_targets = {
+        "theta_tr_raw": batch["hiva_theta_tr_raw"],        # [B, 6, 3]
+        "theta_rot_raw": batch["hiva_theta_rot_raw"],      # [B, 6, 3]
+        "theta_grip_raw": batch["hiva_theta_grip_raw"],    # [B, 6, 1]
+        "duration_class": batch["duration_class"].long(),
+        "duration_label": batch["duration_label"].long(),
+        "tail_mode": batch.get("hiva_tail_mode", None),
+    }
 
+model_output = self.model.forward(
+    images, img_masks, lang_tokens, lang_masks, state,
+    actions, noise, time, hiva_targets=hiva_targets,
+)
+\end{lstlisting}
 
+Inside the action expert, add coefficient projections, heads, coefficient-stat buffers, and a coefficient suffix embedding function. The suffix order is duration first, then translation, rotation, and gripper coefficient tokens. The attention increment mask is one bidirectional suffix block.
+
+\begin{lstlisting}[language=Python]
+# VLAFlowMatching.__init__ sketch
+if config.use_hiva_coeff_action:
+    h = self.vlm_with_expert.expert_hidden_size
+    K = config.hiva_k
+    self.hiva_duration_token = nn.Parameter(torch.zeros(1, 1, h))
+    nn.init.normal_(self.hiva_duration_token, mean=0.0, std=0.02)
+    self.hiva_tr_in_proj = nn.Linear(3, h)
+    self.hiva_rot_in_proj = nn.Linear(3, h)
+    self.hiva_grip_in_proj = nn.Linear(1, h)
+    self.hiva_tr_out_proj = nn.Linear(h, 3)
+    self.hiva_rot_out_proj = nn.Linear(h, 3)
+    self.hiva_grip_out_proj = nn.Linear(h, 1)
+    self.hiva_duration_head = nn.Linear(h, len(config.hiva_duration_classes))
+\end{lstlisting}
+
+\begin{lstlisting}[language=Python]
 def embed_hiva_suffix(self, theta_tr_t, theta_rot_t, theta_grip_t, timestep):
     # theta_tr_t: [B, 6, 3], theta_rot_t: [B, 6, 3], theta_grip_t: [B, 6, 1]
-    tr_emb = self.tr_in_proj(theta_tr_t)
-    rot_emb = self.rot_in_proj(theta_rot_t)
-    grip_emb = self.grip_in_proj(theta_grip_t)
-    bsize, device, dtype = theta_tr_t.shape[0], theta_tr_t.device, tr_emb.dtype
+    tr_emb = self.hiva_tr_in_proj(theta_tr_t)
+    rot_emb = self.hiva_rot_in_proj(theta_rot_t)
+    grip_emb = self.hiva_grip_in_proj(theta_grip_t)
+    # Add the usual sinusoidal time embedding to all coefficient tokens.
+    tr_emb = self.add_hiva_time_embedding(tr_emb, timestep)
+    rot_emb = self.add_hiva_time_embedding(rot_emb, timestep)
+    grip_emb = self.add_hiva_time_embedding(grip_emb, timestep)
 
-    time_emb = create_sinusoidal_pos_embedding(
-        timestep, self.vlm_with_expert.expert_hidden_size,
-        self.config.min_period, self.config.max_period, device=device,
-    ).to(dtype=dtype)
-    time_emb = time_emb[:, None, :]
-    tr_emb = self.hiva_time_mlp(tr_emb, time_emb.expand_as(tr_emb))
-    rot_emb = self.hiva_time_mlp(rot_emb, time_emb.expand_as(rot_emb))
-    grip_emb = self.hiva_time_mlp(grip_emb, time_emb.expand_as(grip_emb))
-
-    dur_emb = self.duration_token.to(device=device, dtype=dtype).expand(bsize, 1, -1)
+    B, _, H = tr_emb.shape
+    dur_emb = self.hiva_duration_token.to(device=tr_emb.device, dtype=tr_emb.dtype).expand(B, 1, H)
     suffix_embs = torch.cat([dur_emb, tr_emb, rot_emb, grip_emb], dim=1)  # [B, 19, H]
-    suffix_pad_masks = torch.ones(bsize, suffix_embs.shape[1], dtype=torch.bool, device=device)
+    suffix_pad_masks = torch.ones(B, suffix_embs.shape[1], dtype=torch.bool, device=tr_emb.device)
 
-    # One bidirectional suffix block: [duration][tr][rot][grip]
-    ar = torch.tensor([1] + [0] * (suffix_embs.shape[1] - 1), dtype=torch.bool, device=device)
-    suffix_att_masks = ar[None, :].expand(bsize, -1)
+    # one bidirectional suffix block; do not use raw-action causal ordering
+    suffix_att_masks = torch.tensor([1] + [0] * (suffix_embs.shape[1] - 1),
+                                    dtype=torch.bool, device=tr_emb.device)
+    suffix_att_masks = suffix_att_masks[None, :].expand(B, -1)
     return suffix_embs, suffix_pad_masks, suffix_att_masks
+\end{lstlisting}
 
+The Experiment 4 forward pass should be simple and should not decode B-splines for training losses.
 
-def forward_hiva_coeff(self, images, img_masks, lang_tokens, lang_masks, state, hiva_targets, time=None):
+\begin{lstlisting}[language=Python]
+def forward_hiva_coeff_fm_only(self, images, img_masks, lang_tokens, lang_masks, state, hiva_targets, time=None):
+    device = state.device
+    B = state.shape[0]
     if time is None:
-        time = self.sample_time(state.shape[0], state.device)
-    eps = 1e-6
-    theta_tr_raw = hiva_targets["hiva_theta_tr_raw"].float()
-    theta_rot_raw = hiva_targets["hiva_theta_rot_raw"].float()
-    theta_grip_raw = hiva_targets["hiva_theta_grip_raw"].float()
-
-    theta_tr = (theta_tr_raw - self.hiva_tr_coef_mean) / (self.hiva_tr_coef_std + eps)
-    theta_rot = (theta_rot_raw - self.hiva_rot_coef_mean) / (self.hiva_rot_coef_std + eps)
-    theta_grip = (theta_grip_raw - self.hiva_grip_coef_mean) / (self.hiva_grip_coef_std + eps)
-
-    noise_tr, noise_rot, noise_grip = torch.randn_like(theta_tr), torch.randn_like(theta_rot), torch.randn_like(theta_grip)
+        time = self.sample_time(B, device)
     t = time[:, None, None]
-    theta_tr_t = t * noise_tr + (1.0 - t) * theta_tr
-    theta_rot_t = t * noise_rot + (1.0 - t) * theta_rot
-    theta_grip_t = t * noise_grip + (1.0 - t) * theta_grip
-    target_tr, target_rot, target_grip = noise_tr - theta_tr, noise_rot - theta_rot, noise_grip - theta_grip
+    eps = 1e-6
 
-    prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-        images, img_masks, lang_tokens, lang_masks, state=state
-    )
-    suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_hiva_suffix(
-        theta_tr_t, theta_rot_t, theta_grip_t, time
-    )
-    pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
-    att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
-    att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
-    position_ids = torch.cumsum(pad_masks, dim=1) - 1
-    (_, suffix_out), _ = self.vlm_with_expert.forward(
-        attention_mask=att_2d_masks,
-        position_ids=position_ids,
-        past_key_values=None,
-        inputs_embeds=[prefix_embs, suffix_embs],
-        use_cache=False,
-        fill_kv_cache=False,
-    )
-    suffix_out = suffix_out[:, -19:].float()
-    dur_h = suffix_out[:, 0]
-    k = self.config.hiva_k
-    tr_h = suffix_out[:, 1 : 1 + k]
-    rot_h = suffix_out[:, 1 + k : 1 + 2 * k]
-    grip_h = suffix_out[:, 1 + 2 * k : 1 + 3 * k]
+    # raw sidecar coefficients -> normalized coefficient targets
+    theta_tr = (hiva_targets["theta_tr_raw"].to(device).float() - self.hiva_tr_coef_mean) / (self.hiva_tr_coef_std + eps)
+    theta_rot = (hiva_targets["theta_rot_raw"].to(device).float() - self.hiva_rot_coef_mean) / (self.hiva_rot_coef_std + eps)
+    theta_grip = (hiva_targets["theta_grip_raw"].to(device).float() - self.hiva_grip_coef_mean) / (self.hiva_grip_coef_std + eps)
 
-    duration_logits = self.duration_head(dur_h)
-    v_tr, v_rot, v_grip = self.tr_out_proj(tr_h), self.rot_out_proj(rot_h), self.grip_out_proj(grip_h)
-    loss_fm_tr = F.mse_loss(v_tr, target_tr)
-    loss_fm_rot = F.mse_loss(v_rot, target_rot)
-    loss_fm_grip = F.mse_loss(v_grip, target_grip)
-    loss_dur = F.cross_entropy(duration_logits.float(), hiva_targets["duration_class"].long())
+    eps_tr = torch.randn_like(theta_tr)
+    eps_rot = torch.randn_like(theta_rot)
+    eps_grip = torch.randn_like(theta_grip)
+    theta_tr_t = t * eps_tr + (1.0 - t) * theta_tr
+    theta_rot_t = t * eps_rot + (1.0 - t) * theta_rot
+    theta_grip_t = t * eps_grip + (1.0 - t) * theta_grip
 
-    # One-step clean estimates for path/tail losses.
-    theta_tr0_raw = (theta_tr_t - t * v_tr) * (self.hiva_tr_coef_std + eps) + self.hiva_tr_coef_mean
-    theta_rot0_raw = (theta_rot_t - t * v_rot) * (self.hiva_rot_coef_std + eps) + self.hiva_rot_coef_mean
-    theta_grip0_raw = (theta_grip_t - t * v_grip) * (self.hiva_grip_coef_std + eps) + self.hiva_grip_coef_mean
-    losses_path_tail = self.compute_hiva_path_tail_losses(
-        duration_logits, theta_tr0_raw, theta_rot0_raw, theta_grip0_raw, hiva_targets
-    )
-    return self.combine_hiva_losses(loss_fm_tr, loss_fm_rot, loss_fm_grip, loss_dur, losses_path_tail)
+    v_tr_target = eps_tr - theta_tr
+    v_rot_target = eps_rot - theta_rot
+    v_grip_target = eps_grip - theta_grip
 
+    prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks, state=state)
+    suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_hiva_suffix(theta_tr_t, theta_rot_t, theta_grip_t, time)
+    suffix_out = self.run_expert_suffix(prefix_embs, prefix_pad_masks, prefix_att_masks, suffix_embs, suffix_pad_masks, suffix_att_masks)
 
-def sample_actions_hiva(self, prefix_cache_inputs):
-    # Start from normalized coefficient noise.
-    theta_tr_t = torch.randn(bsize, self.config.hiva_k, 3, device=device)
-    theta_rot_t = torch.randn(bsize, self.config.hiva_k, 3, device=device)
-    theta_grip_t = torch.randn(bsize, self.config.hiva_k, 1, device=device)
+    dur_h, tr_h, rot_h, grip_h = self.split_hiva_suffix_out(suffix_out)  # [B,1,H], [B,6,H], [B,6,H], [B,6,H]
+    duration_logits = self.hiva_duration_head(dur_h.squeeze(1)).float()
+    v_tr_pred = self.hiva_tr_out_proj(tr_h).float()
+    v_rot_pred = self.hiva_rot_out_proj(rot_h).float()
+    v_grip_pred = self.hiva_grip_out_proj(grip_h).float()
+
+    loss_tr = F.mse_loss(v_tr_pred, v_tr_target)
+    loss_rot = F.mse_loss(v_rot_pred, v_rot_target)
+    loss_grip = F.mse_loss(v_grip_pred, v_grip_target)
+    loss_dur = F.cross_entropy(duration_logits, hiva_targets["duration_class"].to(device).long())
+    loss = (self.config.hiva_fm_tr_loss_weight * loss_tr
+            + self.config.hiva_fm_rot_loss_weight * loss_rot
+            + self.config.hiva_fm_grip_loss_weight * loss_grip
+            + self.config.hiva_duration_loss_weight * loss_dur)
+    return loss, {
+        "loss_fm_tr": loss_tr.item(),
+        "loss_fm_rot": loss_rot.item(),
+        "loss_fm_grip": loss_grip.item(),
+        "loss_duration": loss_dur.item(),
+        "duration_acc": (duration_logits.argmax(-1) == hiva_targets["duration_class"].to(device)).float().mean().item(),
+    }
+\end{lstlisting}
+
+Inference still requires decoding even though training does not use path/tail losses. Denoise normalized coefficients from Gaussian noise, unnormalize them with coefficient stats, decode raw LIBERO translation/rotation/gripper actions with the hard predicted duration, clamp only the final raw gripper channel, then normalize the decoded raw action chunk back into ACTION mean/std space before returning through the standard policy path.
+
+\begin{lstlisting}[language=Python]
+def sample_actions_hiva_coeff(self, images, img_masks, lang_tokens, lang_masks, state, noise=None, **kwargs):
+    B, device = state.shape[0], state.device
+    theta_tr_t = torch.randn(B, 6, 3, device=device)
+    theta_rot_t = torch.randn(B, 6, 3, device=device)
+    theta_grip_t = torch.randn(B, 6, 1, device=device)
+    prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks, state=state)
+    past_key_values = self.fill_prefix_cache(prefix_embs, prefix_pad_masks, prefix_att_masks)
+    dt = -1.0 / self.config.num_steps
+    duration_logits = None
     for step in range(self.config.num_steps):
-        t = torch.full((bsize,), 1.0 - step / self.config.num_steps, device=device)
-        v_tr, v_rot, v_grip, duration_logits = self.hiva_denoise_step(theta_tr_t, theta_rot_t, theta_grip_t, t)
-        dt = -1.0 / self.config.num_steps
+        time = torch.full((B,), 1.0 + step * dt, device=device)
+        v_tr, v_rot, v_grip, duration_logits = self.hiva_denoise_step_with_cache(
+            theta_tr_t, theta_rot_t, theta_grip_t, time, prefix_pad_masks, past_key_values)
         theta_tr_t = theta_tr_t + dt * v_tr
         theta_rot_t = theta_rot_t + dt * v_rot
         theta_grip_t = theta_grip_t + dt * v_grip
 
-    theta_tr_raw = theta_tr_t * (self.hiva_tr_coef_std + eps) + self.hiva_tr_coef_mean
-    theta_rot_raw = theta_rot_t * (self.hiva_rot_coef_std + eps) + self.hiva_rot_coef_mean
-    theta_grip_raw = theta_grip_t * (self.hiva_grip_coef_std + eps) + self.hiva_grip_coef_mean
-    A_raw, duration_steps = self.decode_hiva_coeffs_to_raw_actions(theta_tr_raw, theta_rot_raw, theta_grip_raw, duration_logits)
-    A_raw[..., 6] = A_raw[..., 6].clamp(-1.0, 1.0)  # inference/action-export clamp only
-    A_norm = (A_raw - self.hiva_action_mean) / (self.hiva_action_std + eps)
+    theta_tr_raw = theta_tr_t * (self.hiva_tr_coef_std + 1e-6) + self.hiva_tr_coef_mean
+    theta_rot_raw = theta_rot_t * (self.hiva_rot_coef_std + 1e-6) + self.hiva_rot_coef_mean
+    theta_grip_raw = theta_grip_t * (self.hiva_grip_coef_std + 1e-6) + self.hiva_grip_coef_mean
+    A_raw, duration_steps = self.decode_hiva_coeffs_to_raw_actions(
+        theta_tr_raw, theta_rot_raw, theta_grip_raw, duration_logits, hard_duration=True)
+    A_raw[..., 6] = A_raw[..., 6].clamp(-1.0, 1.0)  # inference/export only
+    A_norm = (A_raw - self.hiva_action_mean) / (self.hiva_action_std + 1e-6)
     return A_norm, duration_steps
 \end{lstlisting}
 
-\subsubsection*{Useful ABPolicy code patterns}
-ABPolicy is useful mainly as a reference for the offline fitter and the coefficient-space flow-matching target. It uses cubic B-splines, predicts continuous B-spline control points, and trains a flow-matching policy in the control-point space \cite{abpolicy2026}. Codex should reuse the following patterns conceptually, not copy the full asynchronous execution or continuity-constrained refitting system.
+\subsubsection*{Validation metrics without training reconstruction losses}
+Even though Experiment 4 does not train with path/tail losses, Codex should log decoded reconstruction metrics in validation or offline analysis. Useful metrics are decoded translation RMSE, decoded rotation-delta RMSE, decoded gripper RMSE, gripper sign accuracy, duration accuracy, and separate reconstruction summaries for \texttt{real} versus \texttt{terminal\_hold} sidecar rows. These metrics catch B-spline reconstruction or action-normalization bugs without adding complexity to the first training objective.
 
-\paragraph{Fixed B-spline fitter.}
-ABPolicy's fitter is parameterized by sequence length, spline degree, and number of control points:
+\subsubsection*{Useful ABPolicy code patterns}
+ABPolicy is useful for Experiment 4 only as a reference pattern, not as a dependency. The relevant idea is that the policy trains in continuous B-spline control-point space rather than raw micro-action space \cite{abpolicy2026}. Its fitter pattern is
 \begin{lstlisting}[language=Python]
 # ABPolicy-code/utils/curve_fitter.py pattern
 fitter = BSplineFitter(T=action_history_horizon + action_horizon,
@@ -966,7 +1053,7 @@ fitter = BSplineFitter(T=action_history_horizon + action_horizon,
 ctrl_y = fitter.fit_batch(action_chunk)  # [B, n_ctrl, action_dim]
 traj, _ = fitter.rebuild(ctrl_y)
 \end{lstlisting}
-For HiVA Experiment 3, instantiate one fitter per duration class in the offline sidecar builder:
+For HiVA, instantiate one offline fitter per duration:
 \begin{lstlisting}[language=Python]
 for d in (6, 10, 15):
     fitter_d = BSplineFitter(T=d, k=3, n_ctrl=6)
@@ -974,29 +1061,7 @@ for d in (6, 10, 15):
     theta_rot_d = fitter_d.fit_batch(rho_rot_batch_d)    # [B_d, 6, 3]
     theta_grip_d = fitter_d.fit_batch(G_grip_batch_d)    # [B_d, 6, 1]
 \end{lstlisting}
-Keep SciPy-based fitting offline. The model forward should use precomputed coefficients and PyTorch basis matrices only.
-
-\paragraph{Training in control-point space.}
-ABPolicy replaces the raw action training target with fitted B-spline control points:
-\begin{lstlisting}[language=Python]
-# ABPolicy-code/train.py pattern
-action_fitter = BSplineFitter(T=bspline_fit_length,
-                              k=conf.b_spline_k,
-                              n_ctrl=conf.b_spline_ctrl_n)
-fitter_input = batch["/observations/action"].numpy()
-action_ctrl_y = action_fitter.fit_batch(fitter_input)
-batch["/observations/action"] = torch.from_numpy(action_ctrl_y).float()
-\end{lstlisting}
-HiVA should follow the same high-level idea but compute and save the control points before training:
-\begin{equation}
-\text{raw actions}\rightarrow
-\text{cumulative tr/rot and absolute gripper labels}\rightarrow
-\text{B-spline coefficients}\rightarrow
-\text{coefficient-space flow matching}.
-\end{equation}
-
-\paragraph{Flow-matching target.}
-ABPolicy samples noise/time in the control-point space and trains the model to predict the conditional flow target:
+ABPolicy's training pattern also shows the correct flow-matching abstraction in control-point space:
 \begin{lstlisting}[language=Python]
 # ABPolicy-code/train.py pattern
 noise = torch.randn_like(actions)
@@ -1010,11 +1075,269 @@ The HiVA equivalent is
 eps = torch.randn_like(theta_norm)
 theta_t = t * eps + (1.0 - t) * theta_norm
 target = eps - theta_norm
-pred = hiva_head(hiva_hidden)
+pred = hiva_coeff_head(hiva_hidden)
 loss = F.mse_loss(pred, target)
 \end{lstlisting}
-This is the central implementation pattern for Experiment 3.
+Do not copy ABPolicy's asynchronous execution or continuity-refitting code into Experiment 4. Those are useful future additions, but the first goal is a stable coefficient-space SmolVLA branch.
 
+
+\subsection{Experiment 5: canonical hold-pad HP HiVA}
+\label{app:exp-hp-hiva}
+Experiment 5 addresses a failure mode of the duration-specific coefficient decoder used in Experiments 3--4. In the duration-specific decoder, a duration mistake changes both the number of executed actions and the B-spline basis used to decode those actions:
+\begin{equation}
+\hat d_s\rightarrow \Phi_{\hat d_s}\hat\Theta_s.
+\end{equation}
+Thus, if coefficients that should be decoded with a long-duration basis are accidentally decoded with a short-duration basis, the motion can be compressed or warped. HP HiVA removes this basis-switching failure by using one canonical $D_{\max}$ basis for every sample and every inference call. Duration then controls only the execution horizon, not the coefficient coordinate system.
+
+\paragraph{Fixed representation.}
+For the current implementation we use
+\begin{equation}
+\mathcal{D}=\{6,10,15\},
+\qquad
+D_{\max}=15,
+\qquad
+K=6,
+\qquad
+p=3.
+\end{equation}
+Define the canonical cubic B-spline basis
+\begin{equation}
+\Phi_{\mathrm{can}}
+=
+\Phi_{15}^{K=6,p=3}
+\in\mathbb{R}^{15\times6}.
+\end{equation}
+All translation, rotation, and gripper coefficient targets are fit against this same matrix. The sidecar therefore stores fixed-shape raw coefficients
+\begin{equation}
+\Theta_s^{\mathrm{tr},\star}\in\mathbb{R}^{6\times3},
+\qquad
+\Theta_s^{\mathrm{rot},\star}\in\mathbb{R}^{6\times3},
+\qquad
+\Theta_s^{\mathrm{grip},\star}\in\mathbb{R}^{6\times1}.
+\end{equation}
+The suffix architecture is unchanged from the cleaner coefficient model: the token order is
+\begin{equation}
+[\texttt{duration}]
+[\texttt{translation coefficients}]
+[\texttt{rotation coefficients}]
+[\texttt{gripper coefficients}],
+\end{equation}
+and the preferred attention mode remains \texttt{duration\_prefix}, whose suffix block mask is
+\begin{equation}
+[1,1,0,\ldots,0].
+\end{equation}
+Under SmolVLA's cumulative block-mask semantics, the duration token attends to the multimodal/state prefix and itself, while coefficient tokens attend to the prefix, the duration token, and all coefficient tokens.
+
+\subsubsection*{Offline HP target construction}
+Let $d_s^{\star}\in\{6,10,15\}$ be the horizon-safe duration label for sample $s$. Let $r_s$ be the number of real future expert actions available before the episode boundary. For ordinary rows $r_s\ge d_s^{\star}$, the safe prefix length is $h_s=d_s^{\star}$. For terminal rows with fewer available actions, we use terminal-hold completion and set $h_s=\min(r_s,d_s^{\star})$. This keeps final frames in the training set without inventing extra motion.
+
+For translation, construct the cumulative raw-command target for the available safe prefix:
+\begin{equation}
+P_s^{\star}(\tau)=
+\sum_{m=1}^{\tau}a_{s+m-1}^{\star}[0:3],
+\qquad
+\tau=1,\ldots,h_s.
+\end{equation}
+The HP translation target is the $D_{\max}$-step terminal hold
+\begin{equation}
+\widetilde P_{s,\mathrm{HP}}^{\star}(\tau)=
+\begin{cases}
+P_s^{\star}(\tau), & \tau\le h_s,\\
+P_s^{\star}(h_s), & h_s<\tau\le D_{\max}.
+\end{cases}
+\end{equation}
+For rotation, use the command-space cumulative axis-vector construction in \cref{app:liberoplus-rotation} for $\tau\le h_s$ and then hold the final cumulative rotation vector:
+\begin{equation}
+\widetilde\rho_{s,\mathrm{HP}}^{\star}(\tau)=
+\begin{cases}
+\rho_s^{\star}(\tau), & \tau\le h_s,\\
+\rho_s^{\star}(h_s), & h_s<\tau\le D_{\max}.
+\end{cases}
+\end{equation}
+For gripper, fit the absolute continuous command in $[-1,1]$, not a cumulative gripper sum:
+\begin{equation}
+\widetilde G_{s,\mathrm{HP}}^{\star}(\tau)=
+\begin{cases}
+a_{s+\tau-1}^{\star}[6], & \tau\le h_s,\\
+a_{s+h_s-1}^{\star}[6], & h_s<\tau\le D_{\max}.
+\end{cases}
+\end{equation}
+The HP coefficient targets are then obtained by regularized least squares with the canonical basis:
+\begin{align}
+\Theta_s^{\mathrm{tr},\star}
+&=\arg\min_{\Theta\in\mathbb{R}^{6\times3}}
+\left\|\Phi_{\mathrm{can}}\Theta-
+\widetilde P_{s,\mathrm{HP}}^{\star}\right\|_2^2
++\lambda_{\mathrm{ridge}}\|\Theta\|_F^2,\\
+\Theta_s^{\mathrm{rot},\star}
+&=\arg\min_{\Theta\in\mathbb{R}^{6\times3}}
+\left\|\Phi_{\mathrm{can}}\Theta-
+\widetilde\rho_{s,\mathrm{HP}}^{\star}\right\|_2^2
++\lambda_{\mathrm{ridge}}\|\Theta\|_F^2,\\
+\Theta_s^{\mathrm{grip},\star}
+&=\arg\min_{\Theta\in\mathbb{R}^{6\times1}}
+\left\|\Phi_{\mathrm{can}}\Theta-
+\widetilde G_{s,\mathrm{HP}}^{\star}\right\|_2^2
++\lambda_{\mathrm{ridge}}\|\Theta\|_F^2.
+\end{align}
+Coefficient mean and standard deviation are recomputed from this HP sidecar. Duration-specific coefficients from Experiments 3--4 cannot be reused, because their coefficient coordinates were fit under different basis matrices.
+
+\subsubsection*{Training objective and inference}
+The training objective can stay identical to the flow-only HiVA objective in \cref{app:exp-flow-only-hiva}. The clean normalized coefficient target for modality $m\in\{\mathrm{tr},\mathrm{rot},\mathrm{grip}\}$ is
+\begin{equation}
+\Theta_{s,\mathrm{norm}}^{m,\star}
+=\frac{\Theta_{s,\mathrm{raw}}^{m,\star}-\mu_m}{\sigma_m+\epsilon},
+\end{equation}
+and the flow-matching state is
+\begin{equation}
+\Theta_{s,t}^m=t\epsilon_m+(1-t)\Theta_{s,\mathrm{norm}}^{m,\star},
+\qquad
+u_t^m=\epsilon_m-\Theta_{s,\mathrm{norm}}^{m,\star}.
+\end{equation}
+The heads predict $v_{\theta}^m$, and the coefficient losses are
+\begin{equation}
+L_{\mathrm{FM}}^m=\operatorname{MSE}(v_{\theta}^m,\nu_t^m).
+\end{equation}
+For the current cleaner-suffix implementation we use a simple mean duration CE,
+\begin{equation}
+L_{\mathrm{dur}}=\operatorname{CE}(z_s^{\mathrm{dur}},d_s^{\star}),
+\end{equation}
+with \texttt{hiva\_duration\_loss=ce\_mean} and \texttt{hiva\_suffix\_attention=duration\_prefix}. The total loss is
+\begin{equation}
+L_s^{\mathrm{HP}}=
+\lambda_{\mathrm{tr}}L_{\mathrm{FM}}^{\mathrm{tr}}
++\lambda_{\mathrm{rot}}L_{\mathrm{FM}}^{\mathrm{rot}}
++\lambda_{\mathrm{grip}}L_{\mathrm{FM}}^{\mathrm{grip}}
++\lambda_{\mathrm{dur}}L_{\mathrm{dur}}.
+\end{equation}
+
+At inference, coefficients are always decoded with the canonical basis, independent of the predicted duration:
+\begin{equation}
+\hat P_s=\Phi_{\mathrm{can}}\hat\Theta_s^{\mathrm{tr}},
+\qquad
+\hat\rho_s=\Phi_{\mathrm{can}}\hat\Theta_s^{\mathrm{rot}},
+\qquad
+\hat G_s=\Phi_{\mathrm{can}}\hat\Theta_s^{\mathrm{grip}}.
+\end{equation}
+Translation micro-actions are finite differences,
+\begin{equation}
+\hat a_{s+\tau-1}^{\mathrm{tr}}=\hat P_s(\tau)-\hat P_s(\tau-1),
+\qquad
+\hat P_s(0)=0.
+\end{equation}
+Rotation micro-actions are reconstructed by adjacent $SO(3)$ differences as in \cref{app:liberoplus-rotation}. Gripper commands are the decoded absolute values, clamped only for inference/export:
+\begin{equation}
+\hat a_{s+\tau-1}^{\mathrm{grip}}
+=\operatorname{clip}(\hat G_s(\tau),-1,1).
+\end{equation}
+Finally, duration selects the execution horizon only:
+\begin{equation}
+\hat d_s=\arg\max_{d\in\{6,10,15\}}\pi_s(d),
+\qquad
+\text{execute }\hat a_s,\ldots,\hat a_{s+\hat d_s-1}.
+\end{equation}
+A duration error can still cause too many or too few actions to be queued, but it no longer changes the basis used to decode the coefficients.
+
+\subsubsection*{HP versus MT}
+A natural alternative is the max-target (MT) canonical sidecar. MT uses the same canonical basis $\Phi_{\mathrm{can}}$, but fits coefficients to the real $D_{\max}$-step future target even when the horizon-safe label is shorter:
+\begin{equation}
+\Theta_{s,\mathrm{MT}}^{\star}
+=\arg\min_{\Theta}
+\left\|\Phi_{\mathrm{can}}\Theta-Y_{s,1:D_{\max}}^{\star}\right\|_2^2.
+\end{equation}
+Thus MT uses the duration label only to decide how many decoded actions to execute; the coefficient target itself encodes the entire future chunk. HP instead encodes the safe prefix and holds after it. The four important duration-confusion cases for a simplified $\{6,15\}$ setting are:
+\begin{center}
+\small
+\begin{tabular}{ccp{0.46\linewidth}}
+\toprule
+Pred. $\hat d$ & GT $d^\star$ & Expected behavior \\
+\midrule
+6 & 6 & HP usually gives better prefix actions because its coefficients are optimized for the safe prefix plus hold. MT spends capacity on future steps that should not be executed open-loop. \\
+6 & 15 & HP and MT are effectively identical because no post-duration hold is applied when $d^\star=D_{\max}$. \\
+15 & 6 & HP is safer: if the model incorrectly executes too long, steps 7--15 are trained to hold. MT may execute real future motions that the horizon-safe label explicitly said should wait for re-observation. \\
+15 & 15 & HP and MT are identical. \\
+\bottomrule
+\end{tabular}
+\end{center}
+This comparison favors HP as the main robust deployment target. MT is still useful as an ablation because future steps can sometimes help the spline shape or tangent in the first few steps, but MT is less aligned with the meaning of a conservative horizon-safe duration label.
+
+\subsubsection*{Diagnostics: prefix quality and wrong-long safety}
+The HP sidecar builder should report both prefix accuracy and over-execution safety. Prefix quality compares decoded actions to the real expert prefix:
+\begin{equation}
+E_{\mathrm{prefix}}
+=\frac{1}{h_s}\sum_{\tau=1}^{h_s}
+\left\|\hat a_{s+\tau-1}-a_{s+\tau-1}^{\star}\right\|_2.
+\end{equation}
+Wrong-long safety measures how much motion remains after the safe horizon:
+\begin{equation}
+E_{\mathrm{wrong\text{-}long}}
+=
+\sum_{\tau=d_s^{\star}+1}^{D_{\max}}
+\left(
+\left\|\Delta\hat p_{\tau}\right\|_2
++\left\|\Delta\hat r_{\tau}\right\|_2
++\left|\hat g_{\tau}-\hat g_{d_s^{\star}}\right|
+\right).
+\end{equation}
+For HP this energy should be small on short-duration samples. This diagnostic approximates the dangerous case where the model predicts $15$ even though the GT safe horizon is $6$ or $10$.
+
+\subsubsection*{Hybrid options}
+HP is the default safe method, but several hybrids can test whether future information improves prefix quality without sacrificing safety.
+
+\paragraph{HP+preview.}
+Let $Y^{\mathrm{HP}}$ be the hold-padded target and $Y^{\mathrm{MT}}$ be the real $D_{\max}$ future target. Define
+\begin{equation}
+Y^{\mathrm{mix}}(\tau)=
+\begin{cases}
+Y^{\mathrm{MT}}(\tau), & \tau\le d_s^{\star},\\
+(1-\alpha)Y^{\mathrm{HP}}(\tau)+\alpha Y^{\mathrm{MT}}(\tau), & \tau>d_s^{\star},
+\end{cases}
+\end{equation}
+with a small $\alpha$, e.g., $0.05$--$0.25$. This gives weak future preview while remaining close to HP.
+
+\paragraph{Prefix-prioritized MT.}
+Fit the MT target but use weighted least squares:
+\begin{equation}
+\Theta^{\star}=\arg\min_{\Theta}
+\sum_{\tau=1}^{D_{\max}}w_{\tau}
+\left\|\Phi_{\mathrm{can}}(\tau,:)\Theta-Y^{\mathrm{MT}}(\tau)\right\|_2^2,
+\end{equation}
+where $w_{\tau}=1$ for $\tau\le d_s^{\star}$ and $w_{\tau}=\beta$ for $\tau>d_s^{\star}$, with $\beta\in[0.05,0.25]$. This keeps future actions as a weak fitting signal but prioritizes the safe prefix.
+
+\paragraph{HP with tail-motion regularization.}
+For the safest HP variant, add an offline fitting regularizer on post-duration velocity:
+\begin{equation}
+\lambda_{\mathrm{tail\text{-}vel}}
+\sum_{\tau>d_s^{\star}}
+\left\|
+\left(\Phi_{\mathrm{can}}(\tau,:)-\Phi_{\mathrm{can}}(\tau-1,:)\right)\Theta
+\right\|_2^2.
+\end{equation}
+This penalizes residual motion after the safe horizon and directly improves wrong-long safety.
+
+\paragraph{Dual safe and preview heads.}
+A later architecture can train an HP coefficient head for execution and an MT preview head with a small auxiliary weight. Inference uses only the HP head. This lets the shared transformer learn future structure without using unsafe future actions as the executed control target.
+
+\subsubsection*{Codex-facing implementation notes}
+The implementation should keep previous duration-specific models available. Add or use a config switch such as
+\begin{lstlisting}[language=Python]
+hiva_basis_mode in {"duration_specific", "canonical_hp", "canonical_mt"}
+\end{lstlisting}
+For \texttt{canonical\_hp}, the dataset builder must regenerate the sidecar with $\Phi_{15}$ for all rows and set the summary metadata to match the basis mode. The architecture should register both the existing duration-specific basis buffers and a canonical buffer:
+\begin{lstlisting}[language=Python]
+self.register_buffer("hiva_basis_canonical", phi_15, persistent=False)
+\end{lstlisting}
+The decoder should branch as follows:
+\begin{lstlisting}[language=Python]
+if config.hiva_basis_mode == "duration_specific":
+    # Existing behavior: choose Phi_d by predicted duration.
+    A_raw = decode_with_predicted_duration_basis(theta_raw, duration_steps)
+else:
+    # HP and MT: always decode full Dmax trajectory with Phi_Dmax.
+    A_raw = decode_with_canonical_basis(theta_raw, phi_canonical)
+# Queue only the first predicted duration steps.
+\end{lstlisting}
+The processor path remains the standard SmolVLA path: decoded raw actions are normalized back to ACTION mean/std space before the standard postprocessor unnormalizes them for execution.
 
 \subsection{Duration histograms and phase-conditioned statistics}
 \label{app:histograms}
@@ -1055,19 +1378,18 @@ These pseudo-phases are not provided by LIBERO; they are generated from gripper 
 \end{equation}
 All remaining segments are labeled \texttt{other}, corresponding mainly to approach, departure, and transition regions.
 
+
 \subsection{Basis size, effective degree, and control points}
 \label{app:keff}
-In the coefficient-based HiVA representation, a basis matrix maps control coefficients to cumulative trajectories:
+In the coefficient-based HiVA representation, a basis matrix maps control coefficients to cumulative trajectories or absolute gripper commands:
 \begin{equation}
-\hat P=\Phi_d\Theta^{\mathrm{tr}},
+\hat Y=\Phi_d\Theta,
 \qquad
-\Phi_d\in\mathbb{R}^{d\times K},
-\qquad
-\Theta^{\mathrm{tr}}\in\mathbb{R}^{K\times 3}.
+\Phi_d\in\mathbb{R}^{d\times K}.
 \end{equation}
-Here $K$ is the number of basis functions, equivalently the number of control coefficients or control points per translated or rotated dimension.
+Here $K$ is the number of basis functions, equivalently the number of B-spline control coefficients per action dimension.
 
-The preliminary experiments use two schedules. Experiment 2 uses a variable effective basis size for the older translation-only pilot:
+Experiment 2 keeps the older variable-$K$ translation-only schedule:
 \begin{center}
 \small
 \begin{tabular}{cccp{0.30\linewidth}}
@@ -1083,7 +1405,7 @@ Duration $d$ & $K(d)$ & Degree $p(d)$ & Interpretation \\
 \end{center}
 This variable-$K$ schedule is useful for capacity ablations but requires coefficient padding, active masks, and duration-aware coefficient statistics.
 
-Experiment 3 intentionally removes that complexity by fixing the same cubic coefficient size for all durations and all three action modalities:
+Experiments 3 and 4 intentionally remove that complexity by fixing the same cubic coefficient size for translation, rotation, and gripper:
 \begin{center}
 \small
 \begin{tabular}{cccp{0.30\linewidth}}
@@ -1096,8 +1418,7 @@ Gripper & $\{6,10,15\}$ & 6 & 3 \\
 \bottomrule
 \end{tabular}
 \end{center}
-The fixed-$K$ setting makes every coefficient target have the same shape: $[6,3]$ for translation, $[6,3]$ for rotation, and $[6,1]$ for gripper. For $d=6$, the cubic basis has six sampled rows and six control points; for $d=10$ and $d=15$, the same six control points provide a low-capacity least-squares approximation. This is expected to be adequate for the first pilot because long durations should mostly occur during smooth free-space motion, while switch/contact-sensitive regions should receive shorter labels from the horizon-safe duration sidecar.
-
+The fixed-$K$ setting makes every coefficient target have the same shape: $[6,3]$ for translation, $[6,3]$ for rotation, and $[6,1]$ for gripper. For $d=6$, the cubic basis has six sampled rows and six control points; for $d=10$ and $d=15$, the same six control points provide a compact least-squares approximation. This is expected to be adequate for the first full-coefficient pilot because long durations should mostly occur during smooth free-space motion, while switch/contact-sensitive regions should receive shorter labels from the horizon-safe duration sidecar.
 
 \subsection{Sidecar dataset format for duration-only HiVA-lite}
 \label{app:dataset-format}
@@ -1164,7 +1485,7 @@ with $\mathcal{N}_Z=\mathcal{N}_Z^-\cup\mathcal{N}_Z^+$. The center/free region 
 \mathcal{C}_Z=
 [e^-_Z+W_1+W_3,\;b^+_Z-W_1-W_3).
 \end{equation}
-In the duration-only pilot we use $\mathcal{D}=\{1,3,8\}$, $W_1=15$, and $W_3=15$. If a different duration set is used, the horizon-safe labels must be recomputed directly under that set rather than obtained by remapping old labels. For a three-class set $\mathcal{D}=\{d_1,d_2,d_3\}$ with $d_1<d_2<d_3$, the shortest duration $d_1$ is always valid, $d_2$ is valid in the approach-safe region, and $d_3$ is valid only in the center/free region. For the pilot set this gives the following compact rule:
+In the implementation we use $\mathcal{D}=\{1,3,8\}$, $W_1=15$, and $W_3=15$. To keep the rule compact, define
 \begin{equation}
 \begin{aligned}
 R_3(s;Z) &= [s\notin\mathcal{N}_Z]\wedge B_3(s;Z),\\
@@ -1189,7 +1510,6 @@ A candidate duration $d$ is horizon-safe at start $s$ when
 \mathbf{1}[R_8(s;Z)], & d=8.
 \end{cases}
 \end{equation}
-For a different three-class set, e.g. $\{6,10,15\}$, the corresponding rule is obtained by replacing $(1,3,8)$ with $(6,10,15)$ inside the valid-duration definition. In particular, the shortest duration $6$ is the always-valid fallback; duration $10$ is valid only when its own approach-region boundary test holds; and duration $15$ is valid only in the center/free region. This prevents invalid labels such as assigning duration $10$ merely because a previous $\{1,3,8\}$ label was $3$.
 Let $\mathcal{V}_Z(s)=\{d\in\mathcal{D}:\operatorname{valid}_Z(s,d)=1\}$. The zone-specific label is
 \begin{equation}
 d_Z(s)=

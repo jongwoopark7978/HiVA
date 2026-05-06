@@ -32,12 +32,15 @@ CONDA_ENV_BIN="${CONDA_ENV_BIN:-/home/jongwoopark/miniconda3/envs/smolvla_libero
 export PATH="${CONDA_ENV_BIN}:${PATH}"
 ACCELERATE_BIN="${ACCELERATE_BIN:-${CONDA_ENV_BIN}/accelerate}"
 LEROBOT_TRAIN_BIN="${LEROBOT_TRAIN_BIN:-${CONDA_ENV_BIN}/lerobot-train}"
+RESUME="${RESUME:-false}"
 
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
 mkdir -p "${HF_DATASETS_CACHE}"
 
-RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigcornea_smoke_$(date +%Y%m%d_%H%M%S)}"
+build_run_id
+RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigcornea_smoke_${RUN_ID}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
+guard_train_output_dir "${OUTPUT_DIR}" "${RESUME}"
 build_wandb_args
 
 BATCH_SIZE="${BATCH_SIZE:-8}"
@@ -53,6 +56,7 @@ echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "BATCH_SIZE=${BATCH_SIZE}"
 echo "STEPS=${STEPS}"
 echo "EVAL_FREQ=${EVAL_FREQ}"
+echo "RESUME=${RESUME}"
 print_wandb_config
 echo "ACCELERATE_BIN=${ACCELERATE_BIN}"
 echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
@@ -91,6 +95,7 @@ echo "LEROBOT_TRAIN_BIN=${LEROBOT_TRAIN_BIN}"
   --env.task="${TASKS}" \
   --output_dir="${OUTPUT_DIR}" \
   --job_name="${RUN_NAME}" \
+  --resume="${RESUME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
   --eval_freq="${EVAL_FREQ}" \

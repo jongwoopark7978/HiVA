@@ -324,7 +324,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         """Return the number of queued actions to execute before re-observing.
 
         With duration head enabled, ``n_action_steps`` is only the queue capacity / maximum allowed
-        execution horizon. The duration head chooses the actual prefix length in {1, 3, 8}.
+        execution horizon. The duration head chooses the actual prefix length from the configured
+        duration classes.
         """
         # `select_action` uses one shared queue, so batched eval uses the conservative horizon.
         predicted_horizon = int(duration_steps.reshape(-1).min().item())

@@ -77,6 +77,15 @@ OPTIONAL_SIDECAR_COLS = (
     "hiva_rot_scale_eta",
     "hiva_action_rmse",
     "hiva_action_max_abs_diff",
+    "hiva_basis_mode",
+    "hiva_target_mode",
+    "hiva_basis_dmax",
+    "hiva_basis_k",
+    "hiva_basis_degree",
+    "hiva_prefix_action_rmse",
+    "hiva_prefix_action_max_abs_diff",
+    "hiva_real_prefix_action_rmse",
+    "hiva_real_prefix_action_max_abs_diff",
 )
 
 
@@ -377,11 +386,17 @@ def decode_hiva_segment_actions(side_row: dict[str, Any]) -> np.ndarray:
     theta_tr = np.asarray(side_row["hiva_theta_tr_raw"], dtype=np.float64)
     theta_rot = np.asarray(side_row["hiva_theta_rot_raw"], dtype=np.float64)
     theta_grip = np.asarray(side_row["hiva_theta_grip_raw"], dtype=np.float64)
-    n_ctrl = int(side_row.get("hiva_k", theta_tr.shape[0]))
-    degree = int(side_row.get("hiva_degree", 3))
+    n_ctrl = int(side_row.get("hiva_basis_k", side_row.get("hiva_k", theta_tr.shape[0])))
+    degree = int(side_row.get("hiva_basis_degree", side_row.get("hiva_degree", 3)))
     eta = float(side_row.get("hiva_rot_scale_eta", 0.5))
+    basis_mode = str(side_row.get("hiva_basis_mode", "duration_specific"))
+    basis_horizon = (
+        int(side_row.get("hiva_basis_dmax", duration))
+        if basis_mode in {"canonical_hp", "canonical_mt"}
+        else duration
+    )
 
-    phi = clamped_bspline_basis(duration, n_ctrl=n_ctrl, degree=degree)
+    phi = clamped_bspline_basis(basis_horizon, n_ctrl=n_ctrl, degree=degree)
     p_tr = phi @ theta_tr
     rho_rot = phi @ theta_rot
     g_grip = phi @ theta_grip
@@ -423,8 +438,16 @@ def decoded_actions_for_episode(
                 "tail_mode": side_row.get("hiva_tail_mode", "unknown"),
                 "hiva_real_steps": int(side_row.get("hiva_real_steps", segment["duration"])),
                 "hiva_has_synthetic_tail": int(side_row.get("hiva_has_synthetic_tail", 0)),
-                "stored_action_rmse": float(side_row.get("hiva_action_rmse", -1.0)),
-                "stored_action_max_abs_diff": float(side_row.get("hiva_action_max_abs_diff", -1.0)),
+                "basis_mode": str(side_row.get("hiva_basis_mode", "duration_specific")),
+                "stored_action_rmse": float(
+                    side_row.get("hiva_prefix_action_rmse", side_row.get("hiva_action_rmse", -1.0))
+                ),
+                "stored_action_max_abs_diff": float(
+                    side_row.get(
+                        "hiva_prefix_action_max_abs_diff",
+                        side_row.get("hiva_action_max_abs_diff", -1.0),
+                    )
+                ),
                 "episode_replay_action_rmse": float(np.sqrt(np.mean(diff**2))) if diff.size else 0.0,
                 "episode_replay_action_max_abs_diff": float(np.max(np.abs(diff))) if diff.size else 0.0,
             }

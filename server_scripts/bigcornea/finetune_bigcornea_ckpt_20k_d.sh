@@ -23,6 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+source "${REPO_ROOT}/server_scripts/common_wandb.sh"
 
 LOG_DIR="${REPO_ROOT}/outputs/train_logs"
 mkdir -p "${LOG_DIR}"
@@ -109,8 +110,10 @@ LEROBOT_TRAIN_BIN="${LEROBOT_TRAIN_BIN:-${CONDA_ENV_BIN}/lerobot-train}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
 mkdir -p "${HF_DATASETS_CACHE}"
 
-RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigcornea_full_s${S}_$(date +%Y%m%d_%H%M%S)}"
+build_run_id
+RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_token_bigcornea_full_s${S}_${RUN_ID}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
+guard_train_output_dir "${OUTPUT_DIR}" "${RESUME}"
 
 WANDB_ENABLE="${WANDB_ENABLE:-false}"
 WANDB_PROJECT="${WANDB_PROJECT:-lerobot}"

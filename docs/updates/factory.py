@@ -151,8 +151,6 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             duration_classes=tuple(getattr(cfg.policy, "hiva_duration_classes")),
             require_full_coverage=True,
             expected_basis_mode=getattr(cfg.policy, "hiva_basis_mode", None),
-            expected_basis_dmax=getattr(cfg.policy, "hiva_dmax", None),
-            expected_basis_degree=getattr(cfg.policy, "hiva_degree", None),
         )
 
     return dataset

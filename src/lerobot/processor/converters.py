@@ -173,6 +173,7 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
     episode_index_key = {"episode_index": batch["episode_index"]} if "episode_index" in batch else {}
     duration_class_key = {"duration_class": batch["duration_class"]} if "duration_class" in batch else {}
     duration_label_key = {"duration_label": batch["duration_label"]} if "duration_label" in batch else {}
+    hiva_sidecar_keys = {k: v for k, v in batch.items() if k.startswith("hiva_")}
 
     return {
         **pad_keys,
@@ -183,6 +184,7 @@ def _extract_complementary_data(batch: dict[str, Any]) -> dict[str, Any]:
         **episode_index_key,
         **duration_class_key,
         **duration_label_key,
+        **hiva_sidecar_keys,
     }
 
 

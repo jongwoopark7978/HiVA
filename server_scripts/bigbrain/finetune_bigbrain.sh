@@ -46,7 +46,11 @@ trap cleanup EXIT
 # export HF_DATASETS_CACHE="/nfs/bigflow/add_disk0/jongwoopark/jongwoopark_hf_datasets_cache"
 # mkdir -p "${HF_DATASETS_CACHE}"
 
-RUN_NAME="smolvla_libero_multitask_$(date +%Y%m%d_%H%M%S)"
+build_run_id
+RUN_NAME="${RUN_NAME:-smolvla_libero_multitask_${RUN_ID}}"
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/train/${RUN_NAME}}"
+RESUME="${RESUME:-false}"
+guard_train_output_dir "${OUTPUT_DIR}" "${RESUME}"
 build_wandb_args
 print_wandb_config
 
@@ -107,8 +111,9 @@ accelerate launch --multi_gpu --num_processes=4 --mixed_precision=bf16 "$(which 
   --dataset.root="${DATA_ROOT}" \
   --env.type=libero \
   --env.task="${TASKS}" \
-  --output_dir=outputs/train/${RUN_NAME} \
+  --output_dir="${OUTPUT_DIR}" \
   --job_name="${RUN_NAME}" \
+  --resume="${RESUME}" \
   --eval.batch_size=1 \
   --eval.n_episodes=1 \
   --eval_freq="${EVAL_FREQ:-0}" \

@@ -23,11 +23,14 @@ set -euo pipefail
 #   bash server_scripts/bigflow/finetune_bigflow_ckpt_20k_d_clean_noisy.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${REPO_ROOT}/server_scripts/common_wandb.sh"
+build_run_id
 
 export DURATION_LOSS_WEIGHT="${DURATION_LOSS_WEIGHT:-0.05}"
 export DURATION_NOISY_LOSS_WEIGHT="${DURATION_NOISY_LOSS_WEIGHT:-0.01}"
 export DURATION_NOISY_SIGMA="${DURATION_NOISY_SIGMA:-0.25}"
-export RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_clean_noisy_bigflow_s${S:-2}_$(date +%Y%m%d_%H%M%S)}"
+export RUN_NAME="${RUN_NAME:-smolvla_hiva_duration_clean_noisy_bigflow_s${S:-2}_${RUN_ID}}"
 
 exec bash "${SCRIPT_DIR}/finetune_bigflow_ckpt_20k_d.sh"
 

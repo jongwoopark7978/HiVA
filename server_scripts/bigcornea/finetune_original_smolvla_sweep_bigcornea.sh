@@ -18,10 +18,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
 source "${REPO_ROOT}/server_scripts/common_wandb.sh"
+build_run_id
 
 LOG_DIR="${REPO_ROOT}/outputs/train_logs"
 mkdir -p "${LOG_DIR}"
-SWEEP_TIMESTAMP="${SWEEP_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+SWEEP_TIMESTAMP="${SWEEP_TIMESTAMP:-${RUN_ID}}"
 LOG_FILE="${LOG_DIR}/original_smolvla_sweep_bigcornea_${SWEEP_TIMESTAMP}.log"
 
 exec > >(tee -a "${LOG_FILE}") 2>&1
@@ -169,6 +170,7 @@ run_one_s() {
   local save_freq="${SAVE_FREQ_OVERRIDE:-$(calc_save_freq "${steps}")}"
   local run_name="${RUN_PREFIX}_s${s}_${SWEEP_TIMESTAMP}"
   local output_dir="${OUTPUT_ROOT}/${run_name}"
+  guard_train_output_dir "${output_dir}" "${RESUME}"
 
   WANDB_NOTES="${WANDB_NOTES_BASE:-original SmolVLA no-duration sequential S sweep on bigcornea; S=${s}; steps=${steps}; global_batch=${GLOBAL_BATCH_SIZE}}"
   build_wandb_args
