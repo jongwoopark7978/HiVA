@@ -1,0 +1,253 @@
+--- modeling_smolvla_hiva_coeff.py
++++ modeling_smolvla_hiva_coeff.py
+@@ -2023,6 +2023,49 @@
+             "hiva_residual_flow_loss_scaled": 0.0,
+             "hiva_residual_flow_decoded_loss": 0.0,
+             "hiva_residual_flow_decoded_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_tr_loss": 0.0,
++            "hiva_residual_flow_decoded_tr_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_rot_loss": 0.0,
++            "hiva_residual_flow_decoded_rot_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_grip_loss": 0.0,
++            "hiva_residual_flow_decoded_grip_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_prefix_tr_loss": 0.0,
++            "hiva_residual_flow_decoded_prefix_rot_loss": 0.0,
++            "hiva_residual_flow_decoded_prefix_grip_loss": 0.0,
++            "hiva_residual_flow_decoded_prefix_action_loss": 0.0,
++            "hiva_residual_flow_decoded_prefix_tr_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_prefix_rot_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_prefix_grip_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_prefix_action_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_post_duration_tr_loss": 0.0,
++            "hiva_residual_flow_decoded_post_duration_rot_loss": 0.0,
++            "hiva_residual_flow_decoded_post_duration_grip_loss": 0.0,
++            "hiva_residual_flow_decoded_post_duration_action_loss": 0.0,
++            "hiva_residual_flow_decoded_post_duration_tr_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_post_duration_rot_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_post_duration_grip_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_post_duration_action_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_preview_tr_loss": 0.0,
++            "hiva_residual_flow_decoded_preview_rot_loss": 0.0,
++            "hiva_residual_flow_decoded_preview_grip_loss": 0.0,
++            "hiva_residual_flow_decoded_preview_action_loss": 0.0,
++            "hiva_residual_flow_decoded_preview_tr_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_preview_rot_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_preview_grip_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_preview_action_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_terminal_tr_loss": 0.0,
++            "hiva_residual_flow_decoded_terminal_rot_loss": 0.0,
++            "hiva_residual_flow_decoded_terminal_grip_loss": 0.0,
++            "hiva_residual_flow_decoded_terminal_action_loss": 0.0,
++            "hiva_residual_flow_decoded_terminal_tr_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_terminal_rot_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_terminal_grip_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_terminal_action_loss_scaled": 0.0,
++            "hiva_residual_flow_decoded_prefix_weight_mean": 0.0,
++            "hiva_residual_flow_decoded_post_duration_exec_weight_mean": 0.0,
++            "hiva_residual_flow_decoded_preview_weight_mean": 0.0,
++            "hiva_residual_flow_decoded_terminal_weight_mean": 0.0,
++            "hiva_residual_flow_decoded_weight_mean": 0.0,
+             "hiva_residual_flow_z_star_abs_mean": 0.0,
+             "hiva_residual_flow_z_star_abs_max": 0.0,
+             "hiva_residual_flow_z0_abs_mean": 0.0,
+@@ -2118,6 +2161,7 @@
+         pred: HiVACoeffTargets,
+         coeff_hidden: Tensor | None,
+         time: Tensor,
++        duration_label_target: Tensor,
+         target_actions_raw: Tensor | None,
+         target_actions_is_pad: Tensor | None,
+         hiva_fit_real_steps: Tensor | None,
+@@ -2213,6 +2257,128 @@
+         )
+         decoded_per_step = decoded_per_dim.mean(dim=-1)
+         decoded_loss = (decoded_per_step * valid_float).sum(dim=1) / denom
++
++        # Extra logging mirrors the deterministic Stage-1 decoded-action diagnostics.
++        # The residual-flow training loss above remains unchanged: these statistics only
++        # decompose the auxiliary decoded loss by modality and action-time region.
++        tau = torch.arange(1, horizon + 1, device=time.device)[None, :]
++        d_star = duration_label_target.to(device=time.device, dtype=torch.long).reshape(-1, 1)
++        prefix_mask = tau <= d_star
++        post_duration_exec_mask = (tau > d_star) & (tau <= int(self.config.hiva_dmax))
++        preview_mask = tau > int(self.config.hiva_dmax)
++
++        target_action_norm_for_region = target_action_norm
++        if self.config.hiva_decoded_terminal_weight > 0:
++            target_hold_raw = self._build_terminal_hold_target(target_actions_raw, valid_mask)
++            target_action_norm_for_region = self._normalize_raw_actions_for_residual(target_hold_raw)
++
++        decoded_region_per_dim = F.smooth_l1_loss(
++            final_action_norm_for_loss,
++            target_action_norm_for_region,
++            reduction="none",
++            beta=float(self.config.hiva_residual_flow_decoded_loss_beta),
++        )
++
++        def residual_flow_modality_per_step(per_dim: Tensor, start: int, end: int) -> Tensor:
++            if start >= action_dim:
++                return torch.zeros(bsize, horizon, dtype=per_dim.dtype, device=per_dim.device)
++            end = min(end, action_dim)
++            return per_dim[..., start:end].mean(dim=-1)
++
++        tr_per_step = residual_flow_modality_per_step(decoded_region_per_dim, 0, 3)
++        rot_per_step = residual_flow_modality_per_step(decoded_region_per_dim, 3, 6)
++        grip_per_step = residual_flow_modality_per_step(decoded_region_per_dim, 6, 7)
++        tr_decoded = (tr_per_step * valid_float).sum(dim=1) / denom
++        rot_decoded = (rot_per_step * valid_float).sum(dim=1) / denom
++        grip_decoded = (grip_per_step * valid_float).sum(dim=1) / denom
++
++        weights = torch.zeros(bsize, horizon, dtype=valid_float.dtype, device=time.device)
++        weights = torch.where(
++            prefix_mask & valid_mask,
++            torch.full_like(weights, float(self.config.hiva_decoded_prefix_weight)),
++            weights,
++        )
++        weights = torch.where(
++            post_duration_exec_mask & valid_mask,
++            torch.full_like(weights, float(self.config.hiva_decoded_post_duration_exec_weight)),
++            weights,
++        )
++        weights = torch.where(
++            preview_mask & valid_mask,
++            torch.full_like(weights, float(self.config.hiva_decoded_preview_weight)),
++            weights,
++        )
++        if self.config.hiva_decoded_terminal_weight > 0:
++            weights = torch.where(
++                ~valid_mask,
++                torch.full_like(weights, float(self.config.hiva_decoded_terminal_weight)),
++                weights,
++            )
++
++        prefix_region = prefix_mask.expand_as(weights) & valid_mask
++        post_region = post_duration_exec_mask.expand_as(weights) & valid_mask
++        preview_region = preview_mask.expand_as(weights) & valid_mask
++        terminal_region = ~valid_mask
++
++        def safe_mean(x: Tensor) -> float:
++            return x.mean().item() if x.numel() else 0.0
++
++        def region_stats(per_step: Tensor, mask: Tensor, region_weight: float) -> tuple[float, float]:
++            selected = per_step[mask]
++            if selected.numel() == 0:
++                return 0.0, 0.0
++            loss = selected.mean()
++            return loss.item(), (loss * float(region_weight)).item()
++
++        prefix_weights = weights[prefix_region]
++        post_weights = weights[post_region]
++        preview_weights = weights[preview_region]
++        terminal_weights = weights[terminal_region]
++        prefix_tr_loss, prefix_tr_loss_scaled = region_stats(
++            tr_per_step, prefix_region, self.config.hiva_decoded_prefix_weight
++        )
++        prefix_rot_loss, prefix_rot_loss_scaled = region_stats(
++            rot_per_step, prefix_region, self.config.hiva_decoded_prefix_weight
++        )
++        prefix_grip_loss, prefix_grip_loss_scaled = region_stats(
++            grip_per_step, prefix_region, self.config.hiva_decoded_prefix_weight
++        )
++        post_tr_loss, post_tr_loss_scaled = region_stats(
++            tr_per_step, post_region, self.config.hiva_decoded_post_duration_exec_weight
++        )
++        post_rot_loss, post_rot_loss_scaled = region_stats(
++            rot_per_step, post_region, self.config.hiva_decoded_post_duration_exec_weight
++        )
++        post_grip_loss, post_grip_loss_scaled = region_stats(
++            grip_per_step, post_region, self.config.hiva_decoded_post_duration_exec_weight
++        )
++        preview_tr_loss, preview_tr_loss_scaled = region_stats(
++            tr_per_step, preview_region, self.config.hiva_decoded_preview_weight
++        )
++        preview_rot_loss, preview_rot_loss_scaled = region_stats(
++            rot_per_step, preview_region, self.config.hiva_decoded_preview_weight
++        )
++        preview_grip_loss, preview_grip_loss_scaled = region_stats(
++            grip_per_step, preview_region, self.config.hiva_decoded_preview_weight
++        )
++        terminal_tr_loss, terminal_tr_loss_scaled = region_stats(
++            tr_per_step, terminal_region, self.config.hiva_decoded_terminal_weight
++        )
++        terminal_rot_loss, terminal_rot_loss_scaled = region_stats(
++            rot_per_step, terminal_region, self.config.hiva_decoded_terminal_weight
++        )
++        terminal_grip_loss, terminal_grip_loss_scaled = region_stats(
++            grip_per_step, terminal_region, self.config.hiva_decoded_terminal_weight
++        )
++        prefix_action_loss = prefix_tr_loss + prefix_rot_loss + prefix_grip_loss
++        prefix_action_loss_scaled = prefix_tr_loss_scaled + prefix_rot_loss_scaled + prefix_grip_loss_scaled
++        post_action_loss = post_tr_loss + post_rot_loss + post_grip_loss
++        post_action_loss_scaled = post_tr_loss_scaled + post_rot_loss_scaled + post_grip_loss_scaled
++        preview_action_loss = preview_tr_loss + preview_rot_loss + preview_grip_loss
++        preview_action_loss_scaled = preview_tr_loss_scaled + preview_rot_loss_scaled + preview_grip_loss_scaled
++        terminal_action_loss = terminal_tr_loss + terminal_rot_loss + terminal_grip_loss
++        terminal_action_loss_scaled = terminal_tr_loss_scaled + terminal_rot_loss_scaled + terminal_grip_loss_scaled
++
+         total = (
+             float(self.config.hiva_residual_flow_loss_weight) * flow_loss
+             + float(self.config.hiva_residual_flow_decoded_loss_weight) * decoded_loss
+@@ -2233,6 +2399,55 @@
+             "hiva_residual_flow_decoded_loss_scaled": (
+                 float(self.config.hiva_residual_flow_decoded_loss_weight) * decoded_loss.mean()
+             ).item(),
++            "hiva_residual_flow_decoded_tr_loss": tr_decoded.mean().item(),
++            "hiva_residual_flow_decoded_tr_loss_scaled": (
++                float(self.config.hiva_residual_flow_decoded_loss_weight) * tr_decoded.mean()
++            ).item(),
++            "hiva_residual_flow_decoded_rot_loss": rot_decoded.mean().item(),
++            "hiva_residual_flow_decoded_rot_loss_scaled": (
++                float(self.config.hiva_residual_flow_decoded_loss_weight) * rot_decoded.mean()
++            ).item(),
++            "hiva_residual_flow_decoded_grip_loss": grip_decoded.mean().item(),
++            "hiva_residual_flow_decoded_grip_loss_scaled": (
++                float(self.config.hiva_residual_flow_decoded_loss_weight) * grip_decoded.mean()
++            ).item(),
++            "hiva_residual_flow_decoded_prefix_tr_loss": prefix_tr_loss,
++            "hiva_residual_flow_decoded_prefix_rot_loss": prefix_rot_loss,
++            "hiva_residual_flow_decoded_prefix_grip_loss": prefix_grip_loss,
++            "hiva_residual_flow_decoded_prefix_action_loss": prefix_action_loss,
++            "hiva_residual_flow_decoded_prefix_tr_loss_scaled": prefix_tr_loss_scaled,
++            "hiva_residual_flow_decoded_prefix_rot_loss_scaled": prefix_rot_loss_scaled,
++            "hiva_residual_flow_decoded_prefix_grip_loss_scaled": prefix_grip_loss_scaled,
++            "hiva_residual_flow_decoded_prefix_action_loss_scaled": prefix_action_loss_scaled,
++            "hiva_residual_flow_decoded_post_duration_tr_loss": post_tr_loss,
++            "hiva_residual_flow_decoded_post_duration_rot_loss": post_rot_loss,
++            "hiva_residual_flow_decoded_post_duration_grip_loss": post_grip_loss,
++            "hiva_residual_flow_decoded_post_duration_action_loss": post_action_loss,
++            "hiva_residual_flow_decoded_post_duration_tr_loss_scaled": post_tr_loss_scaled,
++            "hiva_residual_flow_decoded_post_duration_rot_loss_scaled": post_rot_loss_scaled,
++            "hiva_residual_flow_decoded_post_duration_grip_loss_scaled": post_grip_loss_scaled,
++            "hiva_residual_flow_decoded_post_duration_action_loss_scaled": post_action_loss_scaled,
++            "hiva_residual_flow_decoded_preview_tr_loss": preview_tr_loss,
++            "hiva_residual_flow_decoded_preview_rot_loss": preview_rot_loss,
++            "hiva_residual_flow_decoded_preview_grip_loss": preview_grip_loss,
++            "hiva_residual_flow_decoded_preview_action_loss": preview_action_loss,
++            "hiva_residual_flow_decoded_preview_tr_loss_scaled": preview_tr_loss_scaled,
++            "hiva_residual_flow_decoded_preview_rot_loss_scaled": preview_rot_loss_scaled,
++            "hiva_residual_flow_decoded_preview_grip_loss_scaled": preview_grip_loss_scaled,
++            "hiva_residual_flow_decoded_preview_action_loss_scaled": preview_action_loss_scaled,
++            "hiva_residual_flow_decoded_terminal_tr_loss": terminal_tr_loss,
++            "hiva_residual_flow_decoded_terminal_rot_loss": terminal_rot_loss,
++            "hiva_residual_flow_decoded_terminal_grip_loss": terminal_grip_loss,
++            "hiva_residual_flow_decoded_terminal_action_loss": terminal_action_loss,
++            "hiva_residual_flow_decoded_terminal_tr_loss_scaled": terminal_tr_loss_scaled,
++            "hiva_residual_flow_decoded_terminal_rot_loss_scaled": terminal_rot_loss_scaled,
++            "hiva_residual_flow_decoded_terminal_grip_loss_scaled": terminal_grip_loss_scaled,
++            "hiva_residual_flow_decoded_terminal_action_loss_scaled": terminal_action_loss_scaled,
++            "hiva_residual_flow_decoded_prefix_weight_mean": safe_mean(prefix_weights),
++            "hiva_residual_flow_decoded_post_duration_exec_weight_mean": safe_mean(post_weights),
++            "hiva_residual_flow_decoded_preview_weight_mean": safe_mean(preview_weights),
++            "hiva_residual_flow_decoded_terminal_weight_mean": safe_mean(terminal_weights),
++            "hiva_residual_flow_decoded_weight_mean": weights.mean().item(),
+             "hiva_residual_flow_z_star_abs_mean": z_star.abs().mean().item(),
+             "hiva_residual_flow_z_star_abs_max": z_star.abs().amax().item(),
+             "hiva_residual_flow_z0_abs_mean": z0_hat.abs().mean().item(),
+@@ -2900,6 +3115,7 @@
+             pred=pred,
+             coeff_hidden=coeff_hidden,
+             time=time,
++            duration_label_target=duration_label_target,
+             target_actions_raw=target_actions_raw,
+             target_actions_is_pad=target_actions_is_pad,
+             hiva_fit_real_steps=hiva_fit_real_steps,

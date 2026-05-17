@@ -119,7 +119,8 @@
   <p class="lede">
     This note documents how the duration labels were created, where the relabeled duration/gripper/PCF
     information is saved, and which scripts are currently used for replay generation, finetuning, and evaluation.
-    Generated for handoff on 2026-05-01 and updated with the canonical HP HiVA K=10 pipeline on 2026-05-05.
+    Generated for handoff on 2026-05-01 and updated with the canonical HP, MT, and LP-MT HiVA
+    coefficient pipelines on 2026-05-08.
   </p>
 
   <div class="panel">
@@ -220,6 +221,51 @@
         <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d6_10_15_k10_canonical_hp.diagnostics.json</td>
         <td>Fit-quality diagnostics for the current HP HiVA sidecar.</td>
         <td>Stores reconstruction and absolute-error summaries used to sanity-check the canonical hold-pad coefficient target.</td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_interaction_zones_all_episodes.parquet</td>
+        <td>Reusable gripper-switch / PCF interaction-zone cache.</td>
+        <td>
+          Stores duration-independent switch zones and pure-contact metadata for all episodes. This lets new
+          duration sets such as <code>{2,15}</code>, <code>{4,15}</code>, and <code>{6,15}</code> be relabeled
+          without redetecting qpos gripper switches or MuJoCo pure-contact frames every time.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_duration_sidecar_d2_15_w1_10_w3_0_all_episodes.parquet</td>
+        <td>Current balanced-duration source for MT and LP-MT HiVA.</td>
+        <td>
+          Recomputed from the interaction-zone cache with duration classes <code>{2,15}</code>,
+          <code>W1=10</code>, and <code>W3=0</code>. It has 273,465 rows across 1,693 episodes with
+          duration histogram <code>2:153,849</code>, <code>15:119,616</code>.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d2_15_w1_10_w3_0_k10_canonical_mt.parquet</td>
+        <td>Canonical MT coefficient sidecar.</td>
+        <td>
+          Uses <code>basis_mode=canonical_mt</code>, <code>target_mode=max_target</code>,
+          executable <code>Dmax=15</code>, cubic degree <code>3</code>, and <code>K=10</code>.
+          Coefficients are fit to the 15-step maximum target rather than a hold-padded duration-specific prefix.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d2_15_w1_10_w3_0_k20_f30_canonical_lp_mt.parquet</td>
+        <td>Current K20 LP-MT coefficient sidecar with 30-step preview.</td>
+        <td>
+          Uses <code>basis_mode=canonical_lp_mt</code>, executable <code>Dmax=15</code>,
+          preview/fit horizon <code>F=30</code>, and <code>K=20</code>. Duration still controls only the
+          executed prefix in <code>{2,15}</code>; the coefficient target covers a longer preview horizon.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d2_15_w1_10_w3_0_k20_f50_canonical_lp_mt.parquet</td>
+        <td>K20 LP-MT coefficient sidecar with 50-step preview.</td>
+        <td>
+          Same LP-MT labeling as above but with <code>fit_horizon=50</code>. This uses the full SmolVLA
+          target-action horizon for coefficient fitting and is useful for testing whether longer previews help
+          or overconstrain the spline fit.
+        </td>
       </tr>
     </tbody>
   </table>
@@ -391,6 +437,418 @@
   <p>
     During inference or GT-coefficient replay, predicted or saved coefficients are decoded into 15 candidate
     micro-actions, and only the first predicted duration actions are executed before the next observation.
+  </p>
+
+  <h2>MT and LP-MT HiVA: Maximum-Target Coefficients</h2>
+  <h3>Motivation</h3>
+  <p>
+    MT HiVA was introduced after observing that HP hold-padding can make a short-duration sample contain a long
+    stationary tail. That tail is useful for horizon-safe execution, but it can also spend coefficient capacity
+    on representing a synthetic stop rather than the real future command shape. MT changes the target from
+    "hold after the executable duration" to "fit the maximum available target horizon." Duration remains a
+    separate prediction that decides how many decoded micro-actions are actually executed.
+  </p>
+  <p>
+    LP-MT extends this idea by decoupling the executable horizon from the coefficient preview horizon. The policy
+    may execute at most <code>Dmax=15</code> actions before re-observing, while the coefficient suffix is trained
+    to describe a longer preview such as <code>F=30</code> or <code>F=50</code>. The hope is that more future
+    structure gives the coefficient tokens a smoother and more informative target, while execution stays safe
+    through the predicted duration in <code>{2,15}</code>.
+  </p>
+
+  <h3>Duration Labels</h3>
+  <p>
+    The current MT/LP-MT duration labels use the two-stage relabeling pipeline. First,
+    <code>build_hiva_interaction_zone_sidecar.py</code> saves duration-independent gripper-switch zones and PCF
+    metadata. Second, <code>relabel_hiva_duration_sidecar_from_zones.py</code> recomputes horizon-safe dense
+    labels for a requested duration set without redetecting contacts or qpos switches. For the current balanced
+    MT/LP-MT setting:
+  </p>
+  <pre><code>duration classes = {2, 15}
+W1 = 10
+W3 = 0
+duration histogram = {2: 153,849, 15: 119,616}
+rows = 273,465</code></pre>
+  <p>
+    These labels are not remapped from <code>{6,10,15}</code>. They are recomputed from the saved interaction
+    zones using the same horizon-safe logic, then consumed by the MT or LP-MT coefficient builders.
+  </p>
+
+  <h3>MT / LP-MT Sidecar Builders and Generated Sidecars</h3>
+  <p>
+    The table below repeats the MT/LP-MT-specific files from the global key-script map so this section can be
+    read independently when preparing or checking an MT/LP-MT dataset.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>Role</th>
+        <th>What To Check</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_interaction_zone_sidecar.py</td>
+        <td>Reusable interaction-zone sidecar builder</td>
+        <td>
+          Creates the duration-independent cache of gripper-switch zones and PCF metadata. This file should be
+          rerun only when the base dataset, qpos/action switch logic, or PCF metadata changes.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/relabel_hiva_duration_sidecar_from_zones.py</td>
+        <td>Duration relabeler from cached zones</td>
+        <td>
+          Recomputes duration labels for a new candidate set. Current MT/LP-MT uses
+          <code>{2,15}</code>, <code>W1=10</code>, and <code>W3=0</code>.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_coeff_sidecar_mt.py</td>
+        <td>Canonical MT coefficient sidecar builder</td>
+        <td>
+          Builds <code>basis_mode=canonical_mt</code> sidecars from a duration sidecar. It fits the 15-step
+          maximum-target coefficients and writes coefficient mean/std into the summary JSON.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_coeff_sidecar_lp_mt.py</td>
+        <td>Canonical LP-MT coefficient sidecar builder</td>
+        <td>
+          Builds <code>basis_mode=canonical_lp_mt</code> sidecars. It keeps executable
+          <code>Dmax=15</code> but fits coefficients over <code>fit_horizon=30</code> or <code>50</code>.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/build_hiva_coeff_lp_mt_sidecar_bigflow.sh</td>
+        <td>Bigflow sidecar launcher</td>
+        <td>
+          Shell wrapper that sets bigflow dataset paths and calls the LP-MT builder. Use
+          <code>HIVA_FIT_HORIZON=15</code> for an MT-like max-target sidecar, or larger values for LP-MT.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_interaction_zones_all_episodes.parquet</td>
+        <td>Generated interaction-zone cache</td>
+        <td>Reusable source for relabeling duration candidates without redetecting qpos switches or PCF contacts.</td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_duration_sidecar_d2_15_w1_10_w3_0_all_episodes.parquet</td>
+        <td>Generated MT/LP-MT duration sidecar</td>
+        <td>Contains 273,465 rows with duration histogram <code>2:153,849</code>, <code>15:119,616</code>.</td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d2_15_w1_10_w3_0_k10_canonical_mt.parquet</td>
+        <td>Generated MT coefficient sidecar</td>
+        <td>Use with <code>hiva_basis_mode=canonical_mt</code>, <code>hiva_k=10</code>, <code>hiva_fit_horizon=15</code>.</td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d2_15_w1_10_w3_0_k20_f30_canonical_lp_mt.parquet</td>
+        <td>Generated LP-MT K20 F30 sidecar</td>
+        <td>Use with <code>hiva_basis_mode=canonical_lp_mt</code>, <code>hiva_k=20</code>, <code>hiva_fit_horizon=30</code>.</td>
+      </tr>
+      <tr>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d2_15_w1_10_w3_0_k20_f50_canonical_lp_mt.parquet</td>
+        <td>Generated LP-MT K20 F50 sidecar</td>
+        <td>Use with <code>hiva_basis_mode=canonical_lp_mt</code>, <code>hiva_k=20</code>, <code>hiva_fit_horizon=50</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Coefficient Targets</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Variant</th>
+        <th>Basis / Horizon</th>
+        <th>Target Meaning</th>
+        <th>Typical Current Files</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>canonical_mt</code></td>
+        <td><code>Dmax=15</code>, cubic degree <code>3</code>, usually <code>K=10</code></td>
+        <td>
+          Fit translation, command-space cumulative rotation, and gripper to the 15-step max target.
+          The target is not held at the predicted duration; duration only determines the executed prefix.
+        </td>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d2_15_w1_10_w3_0_k10_canonical_mt.parquet</td>
+      </tr>
+      <tr>
+        <td><code>canonical_lp_mt</code></td>
+        <td>Executable <code>Dmax=15</code>, preview <code>F=30</code> or <code>F=50</code>, often <code>K=20</code></td>
+        <td>
+          Fit coefficients on a longer preview horizon while executing only the predicted duration.
+          This allows the model to learn from more future actions without increasing the action queue length.
+        </td>
+        <td class="path">/nfs/bigflow/add_disk0/jongwoopark/libero_hiva_coeff_sidecar_d2_15_w1_10_w3_0_k20_f30_canonical_lp_mt.parquet</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Both variants still use the same raw-action semantics: cumulative translation, command-space cumulative
+    SO(3) rotation with <code>Exp</code>/<code>Log</code>, and absolute gripper command. The coefficient summary
+    JSON records <code>coef_stats</code>; the model loads those mean/std values for coefficient normalization.
+  </p>
+
+  <h3>Architecture and Losses</h3>
+  <p>
+    MT and LP-MT reuse the same <code>smolvla_hiva_coeff</code> policy class as HP. The default categorical
+    architecture uses suffix order:
+  </p>
+  <pre><code>[duration][translation coeffs][rotation coeffs][gripper coeffs]</code></pre>
+  <p>
+    With <code>K=10</code>, this gives <code>31</code> suffix tokens. With <code>K=20</code>, it gives
+    <code>61</code> suffix tokens. The current default duration head is <code>residual_ffn</code>, and the
+    current default suffix attention for MT/LP-MT is <code>duration_reads_coeffs</code>: the duration token can
+    read coefficient tokens, while coefficient tokens do not read the duration token. The newer optional
+    <code>hiva_duration_readout=coeff_modality_pool</code> removes the duration suffix token and predicts
+    duration by mean-pooling the final translation/rotation/gripper coefficient hidden states.
+  </p>
+  <p>
+    The base objective is coefficient flow matching plus duration cross entropy:
+  </p>
+  <pre><code>L = L_FM,tr + L_FM,rot + L_FM,grip + lambda_dur * CE(duration)</code></pre>
+  <p>
+    Recent LP-MT decoded-action-loss runs add an auxiliary decoded raw-action loss after converting predicted
+    clean coefficients back into LIBERO action space. The default decoded-loss weights used in the K20 runs are:
+  </p>
+  <pre><code>HIVA_DECODED_ACTION_LOSS_WEIGHT=1.0
+HIVA_DECODED_PREFIX_WEIGHT=1.0
+HIVA_DECODED_POST_DURATION_EXEC_WEIGHT=0.5
+HIVA_DECODED_PREVIEW_WEIGHT=0.1
+HIVA_DECODED_TERMINAL_WEIGHT=0.0
+HIVA_DECODED_ROT_LOSS_WEIGHT=10.0</code></pre>
+
+  <h3>MT / LP-MT Model and Finetuning Files</h3>
+  <p>
+    These are the main files to read when you want to understand how observations, sidecar coefficient labels,
+    duration labels, and predicted decoded actions move through the MT/LP-MT model.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th>Role</th>
+        <th>Why It Matters</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/policies/smolvla_hiva_coeff/configuration_smolvla_hiva_coeff.py</td>
+        <td>Policy/config definition</td>
+        <td>
+          Defines <code>hiva_basis_mode</code>, <code>hiva_duration_classes</code>, <code>hiva_dmax</code>,
+          <code>hiva_fit_horizon</code>, <code>hiva_k</code>, duration readout/prediction modes,
+          suffix-attention modes, decoded-action loss weights, and checkpoint initialization behavior.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/policies/smolvla_hiva_coeff/modeling_smolvla_hiva_coeff.py</td>
+        <td>Model, training loss, and inference implementation</td>
+        <td>
+          Builds the coefficient suffix tokens, applies coefficient normalization, runs the action expert,
+          computes coefficient flow-matching and duration losses, optionally computes decoded-action losses,
+          decodes B-spline coefficients back to raw LIBERO actions, and controls inference-time action queues.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/policies/smolvla_hiva_coeff/processor_smolvla_hiva_coeff.py</td>
+        <td>Processor registration for the policy</td>
+        <td>
+          Connects the HiVA coefficient policy to the SmolVLA processor path so observations, language tokens,
+          state, and normalized actions are prepared consistently with the base SmolVLA pipeline.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/datasets/hiva_coeff_sidecar.py</td>
+        <td>Dataset wrapper for coefficient sidecars</td>
+        <td>
+          Reads sidecar columns such as <code>hiva_theta_tr_raw</code>, <code>hiva_theta_rot_raw</code>,
+          <code>hiva_theta_grip_raw</code>, duration class/label, real-step metadata, and target-action
+          validity masks; these become the MT/LP-MT training targets.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/finetune_bigflow_ckpt_20k_hiva_coeff_mt.sh</td>
+        <td>Bigflow MT finetuning script</td>
+        <td>
+          Sets <code>hiva_basis_mode=canonical_mt</code> and delegates to the shared coefficient finetune
+          entrypoint. Override <code>SIDECAR</code> and <code>SIDECAR_SUMMARY</code> to switch between
+          <code>{2,15}</code>, <code>{4,15}</code>, <code>{6,15}</code>, or <code>{6,10,15}</code> MT sidecars.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/finetune_bigflow_ckpt_20k_hiva_coeff_lp_mt.sh</td>
+        <td>Bigflow LP-MT finetuning script</td>
+        <td>
+          Sets <code>hiva_basis_mode=canonical_lp_mt</code>, <code>POLICY_CHUNK_SIZE=HIVA_FIT_HORIZON</code>,
+          and <code>POLICY_N_ACTION_STEPS=15</code>. Use this for <code>F=30</code>, <code>F=50</code>,
+          and K10/K15/K20 LP-MT comparisons.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/run_hiva_coeff_lpmt_k20_decoded_loss_bigflow.sh</td>
+        <td>K20 decoded-action-loss LP-MT queue</td>
+        <td>
+          Sequentially launches the current K20 LP-MT <code>F=30</code> and <code>F=50</code> decoded-action-loss
+          jobs, with <code>decoded_rot_loss_weight=10</code> and the default region weights listed above.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Current MT / LP-MT Hyperparameters</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Setting</th>
+        <th>MT Default</th>
+        <th>LP-MT Current Runs</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Duration classes</td>
+        <td><code>{2,15}</code> or older comparisons <code>{4,15}</code>, <code>{6,15}</code></td>
+        <td>Current best uses <code>{4,6,10}</code>; earlier LP-MT sweeps used <code>{2,15}</code></td>
+      </tr>
+      <tr>
+        <td>Executable horizon</td>
+        <td><code>Dmax=15</code></td>
+        <td>Current best uses <code>Dmax=10</code>; earlier <code>{2,15}</code> runs used <code>Dmax=15</code></td>
+      </tr>
+      <tr>
+        <td>Preview / fit horizon</td>
+        <td><code>15</code></td>
+        <td>Current best uses <code>15</code>; decoded-loss explorations used <code>30</code> or <code>50</code></td>
+      </tr>
+      <tr>
+        <td>Number of B-spline controls</td>
+        <td><code>K=10</code></td>
+        <td>Current best uses <code>K=10</code>; decoded-loss runs also tested <code>K=15</code> and <code>K=20</code></td>
+      </tr>
+      <tr>
+        <td>Duration loss</td>
+        <td><code>ce_mean</code></td>
+        <td><code>ce_mean</code></td>
+      </tr>
+      <tr>
+        <td>Suffix attention</td>
+        <td><code>duration_reads_coeffs</code></td>
+        <td>Current best uses <code>full</code> with <code>coeff_modality_pool</code> duration readout</td>
+      </tr>
+      <tr>
+        <td>Duration head</td>
+        <td><code>residual_ffn</code></td>
+        <td><code>residual_ffn</code></td>
+      </tr>
+      <tr>
+        <td>Batch size used in recent bigflow runs</td>
+        <td><code>BATCH_PER_GPU=160</code> when memory allows</td>
+        <td>Current best used <code>BATCH_PER_GPU=64</code> on 8 GPUs; K20 decoded-loss runs used <code>BATCH_PER_GPU=128</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Current Best LIBERO LP-MT HiVA Checkpoint</h3>
+  <p>
+    As of 2026-05-16, the best LIBERO result is from the LP-MT stage-0 coefficient-pool model with
+    duration classes <code>{4,6,10}</code>. This run reached <strong>78.75%</strong> success on the
+    400-episode LIBERO evaluation, and the selected checkpoint is <code>003500</code>.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Item</th>
+        <th>Value</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Checkpoint</td>
+        <td class="path">/nfs/bigcornea/add_disk2/jongwoopark/HiVA_train/Best_Models/BestS0p5_78.75_smolvla_hiva_coeff_lpmt_stage0_v5_d4_6_10_coeffpool_full_ce_mean_k10_f15_bigcornea_b64_s0p5_20260514_182207/checkpoints/003500</td>
+      </tr>
+      <tr>
+        <td>Evaluation directory</td>
+        <td class="path">/nfs/bigcornea/add_disk2/jongwoopark/HiVA_train/Best_Models/BestS0p5_78.75_smolvla_hiva_coeff_lpmt_stage0_v5_d4_6_10_coeffpool_full_ce_mean_k10_f15_bigcornea_b64_s0p5_20260514_182207/eval_correct/bigbrain_smolvla_hiva_coeff_lpmt_stage0_v5_d4_6_10_coeffpool_full_ce_mean_k10_f15_bigcornea_b64_s0p5/Best_78.75_ckpt_003500</td>
+      </tr>
+      <tr>
+        <td>Core hyperparameters</td>
+        <td>
+          <code>basis_mode=canonical_lp_mt</code>,
+          <code>duration_classes={4,6,10}</code>,
+          <code>Dmax=10</code>,
+          <code>fit_horizon=15</code>,
+          <code>K=10</code>,
+          <code>duration_loss=ce_mean</code>,
+          <code>suffix_attention=full</code>,
+          <code>duration_readout=coeff_modality_pool</code>,
+          <code>duration_head_type=residual_ffn</code>,
+          <code>duration_noisy_sigma=0.25</code>,
+          <code>duration_noisy_loss_weight=1.0</code>,
+          <code>decoded_action_loss_weight=0.0</code>.
+        </td>
+      </tr>
+      <tr>
+        <td>Training schedule</td>
+        <td>
+          <code>BATCH_PER_GPU=64</code>, <code>8</code> GPUs, step-reduction factor <code>S=0.5</code>,
+          <code>5000</code> total steps, selected checkpoint at step <code>3500</code>.
+        </td>
+      </tr>
+      <tr>
+        <td>Overall evaluation</td>
+        <td>
+          <code>400</code> episodes, <code>78.75%</code> success,
+          mean final duration <code>6.49</code>, mean inference calls <code>52.73</code>.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <table>
+    <thead>
+      <tr>
+        <th>LIBERO Suite</th>
+        <th>Episodes</th>
+        <th>Success</th>
+        <th>Mean Final Duration</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>libero_spatial</code></td>
+        <td><code>100</code></td>
+        <td><code>86.0%</code></td>
+        <td><code>6.76</code></td>
+      </tr>
+      <tr>
+        <td><code>libero_object</code></td>
+        <td><code>100</code></td>
+        <td><code>93.0%</code></td>
+        <td><code>6.00</code></td>
+      </tr>
+      <tr>
+        <td><code>libero_goal</code></td>
+        <td><code>100</code></td>
+        <td><code>80.0%</code></td>
+        <td><code>6.58</code></td>
+      </tr>
+      <tr>
+        <td><code>libero_10</code></td>
+        <td><code>100</code></td>
+        <td><code>56.0%</code></td>
+        <td><code>6.62</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    This result is the current reference point for future LP-MT comparisons. In particular, compare new
+    duration sets, preview horizons, decoded-action losses, and residual-action variants against this
+    <code>{4,6,10}</code>, <code>K=10</code>, <code>F=15</code>, coefficient-pool baseline before replacing
+    the best-model pointer.
   </p>
 
   <h2>Rotation Coefficient Labels</h2>
@@ -727,6 +1185,42 @@ y_obs = (R_abs * R_start.inv()).as_rotvec()</code></pre>
         </td>
       </tr>
       <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_interaction_zone_sidecar.py</td>
+        <td>Reusable interaction-zone sidecar builder</td>
+        <td>
+          Extracts duration-independent gripper-switch zones and pure-contact metadata once. This is the
+          first stage for quickly relabeling new duration candidate sets without rerunning MuJoCo/contact
+          detection.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/relabel_hiva_duration_sidecar_from_zones.py</td>
+        <td>Duration relabeler from cached zones</td>
+        <td>
+          Recomputes dense horizon-safe duration labels for sets such as <code>{2,15}</code>,
+          <code>{4,15}</code>, and <code>{6,15}</code> using saved interaction zones. Current MT/LP-MT labels use
+          <code>W1=10</code>, <code>W3=0</code>.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_coeff_sidecar_mt.py</td>
+        <td>Canonical MT coefficient sidecar builder</td>
+        <td>
+          Builds <code>basis_mode=canonical_mt</code> sidecars from a duration sidecar. It fits
+          max-target coefficients over executable <code>Dmax=15</code>, usually with <code>K=10</code>, and writes
+          coefficient mean/std normalization statistics.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/src/lerobot/scripts/build_hiva_coeff_sidecar_lp_mt.py</td>
+        <td>Canonical LP-MT coefficient sidecar builder</td>
+        <td>
+          Builds <code>basis_mode=canonical_lp_mt</code> sidecars where executable <code>Dmax=15</code> is
+          decoupled from preview/fit horizon <code>F</code>. Current important settings include
+          <code>K=20,F=30</code> and <code>K=20,F=50</code>.
+        </td>
+      </tr>
+      <tr>
         <td class="path">/home/jongwoopark/lerobot/src/lerobot/datasets/hiva_coeff_sidecar.py</td>
         <td>Dataset sidecar wrapper</td>
         <td>
@@ -738,21 +1232,21 @@ y_obs = (R_abs * R_start.inv()).as_rotvec()</code></pre>
       </tr>
       <tr>
         <td class="path">/home/jongwoopark/lerobot/src/lerobot/policies/smolvla_hiva_coeff/configuration_smolvla_hiva_coeff.py</td>
-        <td>HP HiVA policy config</td>
+        <td>HiVA coefficient policy config</td>
         <td>
           Defines duration classes, <code>hiva_k</code>, <code>hiva_dmax</code>, basis mode,
-          duration-loss mode, suffix-attention mode, and the initialization path for the LIBERO-finetuned
-          SmolVLA base checkpoint.
+          <code>hiva_fit_horizon</code>, duration-prediction/readout modes, decoded-action loss weights,
+          suffix-attention mode, and the initialization path for the LIBERO-finetuned SmolVLA base checkpoint.
         </td>
       </tr>
       <tr>
         <td class="path">/home/jongwoopark/lerobot/src/lerobot/policies/smolvla_hiva_coeff/modeling_smolvla_hiva_coeff.py</td>
-        <td>HP HiVA model implementation</td>
+        <td>HiVA coefficient model implementation</td>
         <td>
-          Implements the duration + coefficient suffix, coefficient normalization/unnormalization,
-          flow-matching losses, duration CE losses, suffix attention masks, and coefficient decoding back to
-          executable relative LIBERO actions. With <code>K=10</code>, the suffix length is
-          <code>1 + 3K = 31</code>.
+          Implements HP, MT, and LP-MT coefficient suffixes, coefficient normalization/unnormalization,
+          flow-matching losses, categorical and continuous duration modes, duration-token and pooled-coefficient
+          duration readouts, suffix attention masks, decoded-action auxiliary losses, and coefficient decoding
+          back to executable relative LIBERO actions.
         </td>
       </tr>
       <tr>
@@ -807,6 +1301,43 @@ y_obs = (R_abs * R_start.inv()).as_rotvec()</code></pre>
           Current HP training entrypoint. Defaults to <code>K=10</code>, <code>basis_mode=canonical_hp</code>,
           bigflow dataset paths, <code>chunk_size=15</code>, <code>n_action_steps=15</code>, and initialization from
           <code>/home/jongwoopark/lerobot/smolvla_libero</code>.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/finetune_bigflow_ckpt_20k_hiva_coeff_mt.sh</td>
+        <td>Bigflow MT HiVA coefficient finetuning</td>
+        <td>
+          Wrapper around the shared HP/coeff trainer. Defaults to <code>basis_mode=canonical_mt</code>,
+          <code>hiva_duration_loss=ce_mean</code>, <code>hiva_suffix_attention=duration_reads_coeffs</code>,
+          and <code>hiva_duration_head_type=residual_ffn</code>. Override <code>SIDECAR</code>,
+          <code>SIDECAR_SUMMARY</code>, and <code>HIVA_DURATION_CLASSES</code> for different MT duration sets.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/finetune_bigflow_ckpt_20k_hiva_coeff_lp_mt.sh</td>
+        <td>Bigflow LP-MT HiVA coefficient finetuning</td>
+        <td>
+          LP-MT wrapper. Defaults to <code>basis_mode=canonical_lp_mt</code>, <code>{2,15}</code>,
+          executable <code>Dmax=15</code>, and a configurable <code>HIVA_FIT_HORIZON</code>. Sets
+          <code>POLICY_CHUNK_SIZE=HIVA_FIT_HORIZON</code> and <code>POLICY_N_ACTION_STEPS=15</code>.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/build_hiva_coeff_lp_mt_sidecar_bigflow.sh</td>
+        <td>Bigflow LP-MT sidecar launcher</td>
+        <td>
+          Reusable shell wrapper for generating MT/LP-MT sidecars. It calls
+          <code>build_hiva_coeff_sidecar_lp_mt.py</code>; set <code>HIVA_FIT_HORIZON=15</code> for MT-like
+          max-target sidecars or larger values for LP-MT previews.
+        </td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/server_scripts/bigflow/run_hiva_coeff_lpmt_k20_decoded_loss_bigflow.sh</td>
+        <td>K20 LP-MT decoded-action-loss finetuning queue</td>
+        <td>
+          Runs the current K20 decoded-loss LP-MT jobs for <code>F=30</code> and <code>F=50</code> on bigflow.
+          Uses <code>BATCH_PER_GPU=128</code> in practice for memory, <code>decoded_rot_loss_weight=10</code>,
+          and the decoded-action region weights documented above.
         </td>
       </tr>
       <tr>
@@ -934,6 +1465,8 @@ bash /home/jongwoopark/lerobot/server_scripts/bigtoken/eval_duration_overlay_two
     <li>The duration sidecar does not create extra training samples. It adds labels to the existing frame-indexed LeRobot samples.</li>
     <li>SmolVLA uses <code>chunk_size=50</code>; each frame sample contains current observation/state/text and a future action chunk. A 100-frame episode contributes about 100 samples, with future actions padded/clamped near the episode end.</li>
     <li>HP HiVA uses <code>chunk_size=15</code> and <code>n_action_steps=15</code> because the coefficient suffix decodes a canonical 15-step macro, then executes only the predicted duration in <code>{6,10,15}</code>.</li>
+    <li>MT HiVA also uses executable <code>Dmax=15</code>, but its coefficient target is the 15-step maximum target rather than a hold-padded duration target.</li>
+    <li>LP-MT HiVA sets <code>chunk_size=hiva_fit_horizon</code> such as <code>30</code> or <code>50</code>, while <code>n_action_steps=15</code> remains the maximum executable duration.</li>
     <li>The HP coefficient model initializes compatible base SmolVLA weights from <code>/home/jongwoopark/lerobot/smolvla_libero</code> with <code>load_vlm_weights=false</code>, because the checkpoint already contains the LIBERO-finetuned VLM/action-expert weights.</li>
     <li>The recent memory optimization uses one VLM prefix forward and two action-expert suffix forwards for duration training when prefix-cache reuse is enabled.</li>
     <li>For the clean-plus-noisy ablation, the clean duration loss uses <code>duration_loss_weight</code>; the noisy duration loss uses <code>duration_noisy_loss_weight</code>.</li>
@@ -967,6 +1500,11 @@ bash /home/jongwoopark/lerobot/server_scripts/bigtoken/eval_duration_overlay_two
     on episodes <code>2, 8, 14, 15, 108, 614</code>; episode <code>115</code> had already been generated separately.
   </p>
   <pre>/nfs/bigflow/add_disk0/jongwoopark/duration_replay/hiva_coeff_canonical_hp_d6_10_15_k10_ep2_8_14_15_108_614_decoded</pre>
+  <p>
+    MT and LP-MT decoded replays use the same greedy macro execution rule. Important current replay directories:
+  </p>
+  <pre>/nfs/bigflow/add_disk0/jongwoopark/duration_replay/hiva_coeff_canonical_mt_d2_15_w1_10_w3_0_k10_ep2_8_14_15_108_115_614_decoded
+/nfs/bigflow/add_disk0/jongwoopark/duration_replay/hiva_coeff_canonical_lp_mt_d2_15_w1_10_w3_0_k20_f50_ep2_8_14_15_108_115_614_decoded</pre>
 
   <h2>Current Important Output Locations</h2>
   <table>
@@ -1005,6 +1543,19 @@ bash /home/jongwoopark/lerobot/server_scripts/bigtoken/eval_duration_overlay_two
         <td class="path">/nfs/bigflow/add_disk0/jongwoopark/duration_replay/hiva_coeff_canonical_hp_d6_10_15_k10_ep2_8_14_15_108_614_decoded</td>
         <td>Current HP K=10 GT-coefficient decoded replay videos, decoded action JSON files, segment JSON files, and summaries for selected episodes.</td>
       </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/outputs/train/smolvla_hiva_coeff_lpmt_decodedloss_d2_15_residual_ffn_duration_reads_coeffs_ce_mean_k20_f30_rotw10_bigflow_b128_s2_*</td>
+        <td>Current LP-MT K20 decoded-action-loss finetuning outputs for preview horizon <code>F=30</code>.</td>
+      </tr>
+      <tr>
+        <td class="path">/home/jongwoopark/lerobot/outputs/eval/partial_bigflow_smolvla_hiva_coeff_lpmt_d2_15_bigcornea_job2_k20_f50_b64_s2_10eps_bs10_gpu3_taskwise_20260508_170515</td>
+        <td>
+          Taskwise 10-episode-per-task LIBERO evaluation for an LP-MT K20 F50 checkpoint. The saved
+          <code>task_accuracy_summary.json</code> records suite accuracy:
+          object <code>38%</code>, goal <code>35%</code>, spatial <code>45%</code>, LIBERO-10 <code>9%</code>,
+          overall <code>31.8%</code>.
+        </td>
+      </tr>
     </tbody>
   </table>
 
@@ -1014,7 +1565,10 @@ bash /home/jongwoopark/lerobot/server_scripts/bigtoken/eval_duration_overlay_two
     <li><code>is_pcf=1</code> should occur once per PCF-annotated episode: 148 rows for the current PCF JSON.</li>
     <li>Current coefficient-sidecar duration labels should only be in <code>{6, 10, 15}</code>; duration classes should only be in <code>{0, 1, 2}</code>.</li>
     <li>Current HP coefficient sidecar rows should report <code>hiva_basis_k=10</code>, <code>hiva_basis_degree=3</code>, <code>hiva_basis_dmax=15</code>, and <code>hiva_basis_mode=canonical_hp</code>.</li>
+    <li>Current MT/LP-MT <code>{2,15}</code> duration sidecars should report <code>W1=10</code>, <code>W3=0</code>, and duration histogram <code>2:153,849</code>, <code>15:119,616</code>.</li>
+    <li>Current MT sidecars should report <code>hiva_basis_mode=canonical_mt</code> or <code>basis_mode=canonical_mt</code>; LP-MT sidecars should report <code>canonical_lp_mt</code> and the expected <code>fit_horizon</code>.</li>
     <li>HP model training logs should print <code>HIVA_K=10</code> and <code>HIVA_SUFFIX_LEN=31</code>.</li>
+    <li>LP-MT K20 token-duration training logs should print <code>HIVA_K=20</code> and <code>HIVA_SUFFIX_LEN=61</code>; pooled coefficient duration readout should print <code>HIVA_SUFFIX_LEN=60</code>.</li>
     <li>Training scripts should print <code>EVAL_FREQ=0</code> unless in-training simulation evaluation is intentionally enabled.</li>
     <li>Evaluation scripts should print the sidecar path they use, especially when checkpoints were trained on another server.</li>
   </ul>

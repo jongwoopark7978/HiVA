@@ -152,7 +152,11 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             require_full_coverage=True,
             expected_basis_mode=getattr(cfg.policy, "hiva_basis_mode", None),
             expected_basis_dmax=getattr(cfg.policy, "hiva_dmax", None),
+            expected_fit_horizon=getattr(cfg.policy, "hiva_fit_horizon", None),
             expected_basis_degree=getattr(cfg.policy, "hiva_degree", None),
+            expected_basis_degree_tr=getattr(cfg.policy, "hiva_degree_tr", None),
+            expected_basis_degree_rot=getattr(cfg.policy, "hiva_degree_rot", None),
+            expected_basis_degree_grip=getattr(cfg.policy, "hiva_degree_grip", None),
         )
 
     return dataset

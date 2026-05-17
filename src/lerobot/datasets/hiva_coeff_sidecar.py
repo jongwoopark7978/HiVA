@@ -29,18 +29,27 @@ class HiVACoeffSidecarDataset(torch.utils.data.Dataset):
     RAW_ID_KEYS = ("index", "episode_index", "frame_index")
     OPTIONAL_KEYS = (
         "hiva_real_steps",
+        "hiva_fit_real_steps",
         "hiva_has_synthetic_tail",
         "hiva_tail_mode",
+        "hiva_fit_steps",
         "hiva_basis_mode",
         "hiva_target_mode",
         "hiva_basis_dmax",
+        "hiva_exec_dmax",
+        "hiva_fit_horizon",
         "hiva_basis_k",
         "hiva_basis_degree",
+        "hiva_basis_degree_tr",
+        "hiva_basis_degree_rot",
+        "hiva_basis_degree_grip",
         "hiva_prefix_tr_rmse",
         "hiva_prefix_rot_rmse",
         "hiva_prefix_grip_rmse",
         "hiva_prefix_action_rmse",
         "hiva_real_prefix_action_rmse",
+        "hiva_full_action_rmse",
+        "hiva_full_action_max_abs_diff",
         "hiva_wrong_long_tr_energy",
         "hiva_wrong_long_rot_energy",
         "hiva_wrong_long_grip_energy",
@@ -58,7 +67,11 @@ class HiVACoeffSidecarDataset(torch.utils.data.Dataset):
         require_full_coverage: bool = True,
         expected_basis_mode: str | None = None,
         expected_basis_dmax: int | None = None,
+        expected_fit_horizon: int | None = None,
         expected_basis_degree: int | None = None,
+        expected_basis_degree_tr: int | None = None,
+        expected_basis_degree_rot: int | None = None,
+        expected_basis_degree_grip: int | None = None,
     ):
         self.dataset = dataset
         self.sidecar_path = Path(sidecar_path)
@@ -67,7 +80,11 @@ class HiVACoeffSidecarDataset(torch.utils.data.Dataset):
         self.require_full_coverage = bool(require_full_coverage)
         self.expected_basis_mode = expected_basis_mode
         self.expected_basis_dmax = None if expected_basis_dmax is None else int(expected_basis_dmax)
+        self.expected_fit_horizon = None if expected_fit_horizon is None else int(expected_fit_horizon)
         self.expected_basis_degree = None if expected_basis_degree is None else int(expected_basis_degree)
+        self.expected_basis_degree_tr = None if expected_basis_degree_tr is None else int(expected_basis_degree_tr)
+        self.expected_basis_degree_rot = None if expected_basis_degree_rot is None else int(expected_basis_degree_rot)
+        self.expected_basis_degree_grip = None if expected_basis_degree_grip is None else int(expected_basis_degree_grip)
 
         rows = self._load_rows(self.sidecar_path)
         if not rows:
@@ -109,8 +126,13 @@ class HiVACoeffSidecarDataset(torch.utils.data.Dataset):
                             f"expected_basis_mode={self.expected_basis_mode!r}."
                         )
             self._validate_optional_int(row, "hiva_basis_k", self.n_ctrl)
-            self._validate_optional_int(row, "hiva_basis_dmax", self.expected_basis_dmax)
+            self._validate_optional_int(row, "hiva_basis_dmax", self.expected_fit_horizon or self.expected_basis_dmax)
+            self._validate_optional_int(row, "hiva_fit_horizon", self.expected_fit_horizon)
+            self._validate_optional_int(row, "hiva_exec_dmax", self.expected_basis_dmax)
             self._validate_optional_int(row, "hiva_basis_degree", self.expected_basis_degree)
+            self._validate_optional_int(row, "hiva_basis_degree_tr", self.expected_basis_degree_tr)
+            self._validate_optional_int(row, "hiva_basis_degree_rot", self.expected_basis_degree_rot)
+            self._validate_optional_int(row, "hiva_basis_degree_grip", self.expected_basis_degree_grip)
 
             duration_label = int(row["duration_label"])
             if duration_label not in self.duration_classes:
@@ -241,6 +263,10 @@ class HiVACoeffSidecarDataset(torch.utils.data.Dataset):
         sample["hiva_theta_rot_raw"] = torch.as_tensor(row["hiva_theta_rot_raw"], dtype=torch.float32)
         sample["hiva_theta_grip_raw"] = torch.as_tensor(row["hiva_theta_grip_raw"], dtype=torch.float32)
         sample["hiva_real_steps"] = torch.tensor(int(row.get("hiva_real_steps", -1)), dtype=torch.long)
+        sample["hiva_fit_real_steps"] = torch.tensor(
+            int(row.get("hiva_fit_real_steps", row.get("hiva_fit_steps", -1))), dtype=torch.long
+        )
+        sample["hiva_fit_steps"] = torch.tensor(int(row.get("hiva_fit_steps", -1)), dtype=torch.long)
         sample["hiva_has_synthetic_tail"] = torch.tensor(
             int(row.get("hiva_has_synthetic_tail", 0)), dtype=torch.bool
         )
@@ -254,6 +280,8 @@ class HiVACoeffSidecarDataset(torch.utils.data.Dataset):
             "hiva_prefix_grip_rmse",
             "hiva_prefix_action_rmse",
             "hiva_real_prefix_action_rmse",
+            "hiva_full_action_rmse",
+            "hiva_full_action_max_abs_diff",
             "hiva_wrong_long_tr_energy",
             "hiva_wrong_long_rot_energy",
             "hiva_wrong_long_grip_energy",

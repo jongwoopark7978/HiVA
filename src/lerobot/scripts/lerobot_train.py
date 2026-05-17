@@ -425,6 +425,16 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             f"Start offline training on a fixed dataset, with effective batch size: {effective_batch_size}"
         )
 
+    explicit_save_steps = set(cfg.save_steps or [])
+    if explicit_save_steps:
+        invalid_save_steps = sorted(s for s in explicit_save_steps if s <= 0 or s > cfg.steps)
+        if invalid_save_steps and is_main_process:
+            logging.warning(
+                "Ignoring save_steps outside [1, cfg.steps=%s]: %s", cfg.steps, invalid_save_steps
+            )
+        explicit_save_steps = {s for s in explicit_save_steps if 0 < s <= cfg.steps}
+        explicit_save_steps.add(cfg.steps)
+
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
@@ -449,7 +459,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             progbar.update(1)
         train_tracker.step()
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
-        is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
+        is_periodic_saving_step = cfg.save_freq > 0 and step % cfg.save_freq == 0
+        is_explicit_saving_step = step in explicit_save_steps
+        is_saving_step = is_periodic_saving_step or is_explicit_saving_step or step == cfg.steps
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
         if is_log_step:

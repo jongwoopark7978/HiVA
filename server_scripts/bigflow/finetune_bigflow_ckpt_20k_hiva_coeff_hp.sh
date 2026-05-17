@@ -22,7 +22,19 @@ set -euo pipefail
 #   WANDB_ENABLE=false \
 #   bash server_scripts/bigflow/finetune_bigflow_ckpt_20k_hiva_coeff_hp.sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${HIVA_SCRIPT_SNAPSHOT:-0}" != "1" ]]; then
+  SNAPSHOT_ROOT="${HIVA_SCRIPT_SNAPSHOT_ROOT:-/tmp/jongwoopark_hiva_script_snapshots}"
+  mkdir -p "${SNAPSHOT_ROOT}"
+  SNAPSHOT_PATH="${SNAPSHOT_ROOT}/$(basename "$0").$USER.$(date +%Y%m%d_%H%M%S_%N).$$.sh"
+  cp "$0" "${SNAPSHOT_PATH}"
+  chmod +x "${SNAPSHOT_PATH}"
+  export HIVA_SCRIPT_SNAPSHOT=1
+  export HIVA_ORIGINAL_SCRIPT_PATH="$(readlink -f "$0")"
+  exec bash "${SNAPSHOT_PATH}" "$@"
+fi
+
+SCRIPT_PATH="${HIVA_ORIGINAL_SCRIPT_PATH:-$(readlink -f "$0")}"
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 source "${REPO_ROOT}/server_scripts/common_wandb.sh"
@@ -45,18 +57,57 @@ BASE_STEPS="${BASE_STEPS:-20000}"
 WARMUP_RATIO="${WARMUP_RATIO:-0.03}"
 SCHEDULER_DECAY_LR="${SCHEDULER_DECAY_LR:-2.5e-6}"
 EVAL_FREQ="${EVAL_FREQ:-0}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
+EVAL_N_EPISODES="${EVAL_N_EPISODES:-1}"
+EVAL_TASK_IDS="${EVAL_TASK_IDS:-}"
+EVAL_MAX_PARALLEL_TASKS="${EVAL_MAX_PARALLEL_TASKS:-1}"
 
 HIVA_TR_LOSS_WEIGHT="${HIVA_TR_LOSS_WEIGHT:-1.0}"
 HIVA_ROT_LOSS_WEIGHT="${HIVA_ROT_LOSS_WEIGHT:-1.0}"
 HIVA_GRIP_LOSS_WEIGHT="${HIVA_GRIP_LOSS_WEIGHT:-1.0}"
 HIVA_DURATION_NOISY_LOSS_WEIGHT="${HIVA_DURATION_NOISY_LOSS_WEIGHT:-1.0}"
+HIVA_DURATION_CLEAN_LOSS_WEIGHT="${HIVA_DURATION_CLEAN_LOSS_WEIGHT:-0.0}"
 HIVA_DURATION_NOISY_SIGMA="${HIVA_DURATION_NOISY_SIGMA:-0.25}"
 HIVA_DURATION_LOSS="${HIVA_DURATION_LOSS:-ce_mean}"
+HIVA_DURATION_PREDICTION_TYPE="${HIVA_DURATION_PREDICTION_TYPE:-categorical}"
+HIVA_DURATION_READOUT="${HIVA_DURATION_READOUT:-token}"
+HIVA_DURATION_FM_LOSS_WEIGHT="${HIVA_DURATION_FM_LOSS_WEIGHT:-1.0}"
+HIVA_DURATION_CONT_NORM="${HIVA_DURATION_CONT_NORM:-bounded}"
+HIVA_DURATION_MEAN="${HIVA_DURATION_MEAN:-}"
+HIVA_DURATION_STD="${HIVA_DURATION_STD:-}"
 HIVA_SUFFIX_ATTENTION="${HIVA_SUFFIX_ATTENTION:-duration_prefix}"
 HIVA_BASIS_MODE="${HIVA_BASIS_MODE:-canonical_hp}"
+HIVA_DURATION_CLASSES="${HIVA_DURATION_CLASSES:-[6,10,15]}"
 HIVA_K="${HIVA_K:-10}"
 HIVA_DMAX="${HIVA_DMAX:-15}"
+HIVA_FIT_HORIZON="${HIVA_FIT_HORIZON:-${HIVA_DMAX}}"
 HIVA_DEGREE="${HIVA_DEGREE:-3}"
+HIVA_DEGREE_TR="${HIVA_DEGREE_TR:-}"
+HIVA_DEGREE_ROT="${HIVA_DEGREE_ROT:-}"
+HIVA_DEGREE_GRIP="${HIVA_DEGREE_GRIP:-}"
+HIVA_DURATION_HEAD_TYPE="${HIVA_DURATION_HEAD_TYPE:-linear}"
+HIVA_DURATION_FFN_HIDDEN_MULT="${HIVA_DURATION_FFN_HIDDEN_MULT:-4.0}"
+HIVA_DURATION_FFN_ALPHA_INIT="${HIVA_DURATION_FFN_ALPHA_INIT:-0.1}"
+HIVA_DECODED_ACTION_LOSS_WEIGHT="${HIVA_DECODED_ACTION_LOSS_WEIGHT:-0.0}"
+HIVA_DECODED_TR_LOSS_WEIGHT="${HIVA_DECODED_TR_LOSS_WEIGHT:-1.0}"
+HIVA_DECODED_ROT_LOSS_WEIGHT="${HIVA_DECODED_ROT_LOSS_WEIGHT:-1.0}"
+HIVA_DECODED_GRIP_LOSS_WEIGHT="${HIVA_DECODED_GRIP_LOSS_WEIGHT:-1.0}"
+HIVA_DECODED_PREFIX_WEIGHT="${HIVA_DECODED_PREFIX_WEIGHT:-1.0}"
+HIVA_DECODED_POST_DURATION_EXEC_WEIGHT="${HIVA_DECODED_POST_DURATION_EXEC_WEIGHT:-0.5}"
+HIVA_DECODED_PREVIEW_WEIGHT="${HIVA_DECODED_PREVIEW_WEIGHT:-0.1}"
+HIVA_DECODED_TERMINAL_WEIGHT="${HIVA_DECODED_TERMINAL_WEIGHT:-0.0}"
+HIVA_DECODED_LOSS_BETA="${HIVA_DECODED_LOSS_BETA:-0.1}"
+HIVA_RESIDUAL_ENABLED="${HIVA_RESIDUAL_ENABLED:-false}"
+HIVA_RESIDUAL_HORIZON="${HIVA_RESIDUAL_HORIZON:-${HIVA_FIT_HORIZON}}"
+HIVA_RESIDUAL_FFN_HIDDEN_MULT="${HIVA_RESIDUAL_FFN_HIDDEN_MULT:-4.0}"
+HIVA_RESIDUAL_TOKEN_TIME_HIDDEN_MULT="${HIVA_RESIDUAL_TOKEN_TIME_HIDDEN_MULT:-2.0}"
+HIVA_RESIDUAL_ALPHA_INIT="${HIVA_RESIDUAL_ALPHA_INIT:-0.1}"
+HIVA_RESIDUAL_ZERO_INIT="${HIVA_RESIDUAL_ZERO_INIT:-true}"
+HIVA_RESIDUAL_SCALE_TR="${HIVA_RESIDUAL_SCALE_TR:-}"
+HIVA_RESIDUAL_SCALE_ROT="${HIVA_RESIDUAL_SCALE_ROT:-}"
+HIVA_RESIDUAL_SCALE_GRIP="${HIVA_RESIDUAL_SCALE_GRIP:-}"
+POLICY_CHUNK_SIZE="${POLICY_CHUNK_SIZE:-${HIVA_FIT_HORIZON}}"
+POLICY_N_ACTION_STEPS="${POLICY_N_ACTION_STEPS:-${HIVA_DMAX}}"
 
 export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
@@ -79,7 +130,11 @@ export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
 mkdir -p "${HF_DATASETS_CACHE}"
 
 build_run_id
-RUN_NAME="${RUN_NAME:-smolvla_hiva_coeff_hp_k${HIVA_K}_bigflow_b${BATCH_PER_GPU}_s${S}_${RUN_ID}}"
+HEAD_RUN_SUFFIX=""
+if [[ "${HIVA_DURATION_HEAD_TYPE}" != "linear" ]]; then
+  HEAD_RUN_SUFFIX="_${HIVA_DURATION_HEAD_TYPE}"
+fi
+RUN_NAME="${RUN_NAME:-smolvla_hiva_coeff_hp${HEAD_RUN_SUFFIX}_k${HIVA_K}_bigflow_b${BATCH_PER_GPU}_s${S}_${RUN_ID}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_NAME}}"
 guard_train_output_dir "${OUTPUT_DIR}" "${RESUME}"
 build_wandb_args
@@ -122,64 +177,170 @@ echo "BATCH_SIZE=${BATCH_SIZE}"
 echo "STEPS=${STEPS}"
 echo "SAVE_FREQ=${SAVE_FREQ}"
 echo "EVAL_FREQ=${EVAL_FREQ}"
+echo "EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE}"
+echo "EVAL_N_EPISODES=${EVAL_N_EPISODES}"
+echo "EVAL_TASK_IDS=${EVAL_TASK_IDS}"
+echo "EVAL_MAX_PARALLEL_TASKS=${EVAL_MAX_PARALLEL_TASKS}"
 echo "RESUME=${RESUME}"
 echo "HIVA_TR_LOSS_WEIGHT=${HIVA_TR_LOSS_WEIGHT}"
 echo "HIVA_ROT_LOSS_WEIGHT=${HIVA_ROT_LOSS_WEIGHT}"
 echo "HIVA_GRIP_LOSS_WEIGHT=${HIVA_GRIP_LOSS_WEIGHT}"
 echo "HIVA_DURATION_NOISY_LOSS_WEIGHT=${HIVA_DURATION_NOISY_LOSS_WEIGHT}"
+echo "HIVA_DURATION_CLEAN_LOSS_WEIGHT=${HIVA_DURATION_CLEAN_LOSS_WEIGHT}"
 echo "HIVA_DURATION_NOISY_SIGMA=${HIVA_DURATION_NOISY_SIGMA}"
 echo "HIVA_DURATION_LOSS=${HIVA_DURATION_LOSS}"
+echo "HIVA_DURATION_PREDICTION_TYPE=${HIVA_DURATION_PREDICTION_TYPE}"
+echo "HIVA_DURATION_READOUT=${HIVA_DURATION_READOUT}"
+echo "HIVA_DURATION_FM_LOSS_WEIGHT=${HIVA_DURATION_FM_LOSS_WEIGHT}"
+echo "HIVA_DURATION_CONT_NORM=${HIVA_DURATION_CONT_NORM}"
+echo "HIVA_DURATION_MEAN=${HIVA_DURATION_MEAN}"
+echo "HIVA_DURATION_STD=${HIVA_DURATION_STD}"
 echo "HIVA_SUFFIX_ATTENTION=${HIVA_SUFFIX_ATTENTION}"
 echo "HIVA_BASIS_MODE=${HIVA_BASIS_MODE}"
+echo "HIVA_DURATION_CLASSES=${HIVA_DURATION_CLASSES}"
 echo "HIVA_K=${HIVA_K}"
-echo "HIVA_SUFFIX_LEN=$((1 + 3 * HIVA_K))"
+echo "HIVA_DMAX=${HIVA_DMAX}"
+echo "HIVA_FIT_HORIZON=${HIVA_FIT_HORIZON}"
+echo "HIVA_DEGREE=${HIVA_DEGREE}"
+echo "HIVA_DEGREE_TR=${HIVA_DEGREE_TR}"
+echo "HIVA_DEGREE_ROT=${HIVA_DEGREE_ROT}"
+echo "HIVA_DEGREE_GRIP=${HIVA_DEGREE_GRIP}"
+if [[ "${HIVA_DURATION_PREDICTION_TYPE}" == "categorical" && "${HIVA_DURATION_READOUT}" == "coeff_modality_pool" ]]; then
+  echo "HIVA_SUFFIX_LEN=$((3 * HIVA_K))"
+else
+  echo "HIVA_SUFFIX_LEN=$((1 + 3 * HIVA_K))"
+fi
+echo "HIVA_DURATION_HEAD_TYPE=${HIVA_DURATION_HEAD_TYPE}"
+echo "HIVA_DURATION_FFN_HIDDEN_MULT=${HIVA_DURATION_FFN_HIDDEN_MULT}"
+echo "HIVA_DURATION_FFN_ALPHA_INIT=${HIVA_DURATION_FFN_ALPHA_INIT}"
+echo "HIVA_DECODED_ACTION_LOSS_WEIGHT=${HIVA_DECODED_ACTION_LOSS_WEIGHT}"
+echo "HIVA_DECODED_TR_LOSS_WEIGHT=${HIVA_DECODED_TR_LOSS_WEIGHT}"
+echo "HIVA_DECODED_ROT_LOSS_WEIGHT=${HIVA_DECODED_ROT_LOSS_WEIGHT}"
+echo "HIVA_DECODED_GRIP_LOSS_WEIGHT=${HIVA_DECODED_GRIP_LOSS_WEIGHT}"
+echo "HIVA_DECODED_PREFIX_WEIGHT=${HIVA_DECODED_PREFIX_WEIGHT}"
+echo "HIVA_DECODED_POST_DURATION_EXEC_WEIGHT=${HIVA_DECODED_POST_DURATION_EXEC_WEIGHT}"
+echo "HIVA_DECODED_PREVIEW_WEIGHT=${HIVA_DECODED_PREVIEW_WEIGHT}"
+echo "HIVA_DECODED_TERMINAL_WEIGHT=${HIVA_DECODED_TERMINAL_WEIGHT}"
+echo "HIVA_DECODED_LOSS_BETA=${HIVA_DECODED_LOSS_BETA}"
+echo "HIVA_RESIDUAL_ENABLED=${HIVA_RESIDUAL_ENABLED}"
+echo "HIVA_RESIDUAL_HORIZON=${HIVA_RESIDUAL_HORIZON}"
+echo "HIVA_RESIDUAL_FFN_HIDDEN_MULT=${HIVA_RESIDUAL_FFN_HIDDEN_MULT}"
+echo "HIVA_RESIDUAL_TOKEN_TIME_HIDDEN_MULT=${HIVA_RESIDUAL_TOKEN_TIME_HIDDEN_MULT}"
+echo "HIVA_RESIDUAL_ALPHA_INIT=${HIVA_RESIDUAL_ALPHA_INIT}"
+echo "HIVA_RESIDUAL_ZERO_INIT=${HIVA_RESIDUAL_ZERO_INIT}"
+echo "HIVA_RESIDUAL_SCALE_TR=${HIVA_RESIDUAL_SCALE_TR}"
+echo "HIVA_RESIDUAL_SCALE_ROT=${HIVA_RESIDUAL_SCALE_ROT}"
+echo "HIVA_RESIDUAL_SCALE_GRIP=${HIVA_RESIDUAL_SCALE_GRIP}"
+echo "POLICY_CHUNK_SIZE=${POLICY_CHUNK_SIZE}"
+echo "POLICY_N_ACTION_STEPS=${POLICY_N_ACTION_STEPS}"
 print_wandb_config
+
+HIVA_DURATION_EXTRA_ARGS=()
+if [[ -n "${HIVA_DURATION_MEAN}" ]]; then
+  HIVA_DURATION_EXTRA_ARGS+=(--policy.hiva_duration_mean="${HIVA_DURATION_MEAN}")
+fi
+if [[ -n "${HIVA_DURATION_STD}" ]]; then
+  HIVA_DURATION_EXTRA_ARGS+=(--policy.hiva_duration_std="${HIVA_DURATION_STD}")
+fi
+if [[ -n "${HIVA_DEGREE_TR}" ]]; then
+  HIVA_DURATION_EXTRA_ARGS+=(--policy.hiva_degree_tr="${HIVA_DEGREE_TR}")
+fi
+if [[ -n "${HIVA_DEGREE_ROT}" ]]; then
+  HIVA_DURATION_EXTRA_ARGS+=(--policy.hiva_degree_rot="${HIVA_DEGREE_ROT}")
+fi
+if [[ -n "${HIVA_DEGREE_GRIP}" ]]; then
+  HIVA_DURATION_EXTRA_ARGS+=(--policy.hiva_degree_grip="${HIVA_DEGREE_GRIP}")
+fi
+if [[ -n "${HIVA_RESIDUAL_SCALE_TR}" ]]; then
+  HIVA_DURATION_EXTRA_ARGS+=(--policy.hiva_residual_scale_tr="${HIVA_RESIDUAL_SCALE_TR}")
+fi
+if [[ -n "${HIVA_RESIDUAL_SCALE_ROT}" ]]; then
+  HIVA_DURATION_EXTRA_ARGS+=(--policy.hiva_residual_scale_rot="${HIVA_RESIDUAL_SCALE_ROT}")
+fi
+if [[ -n "${HIVA_RESIDUAL_SCALE_GRIP}" ]]; then
+  HIVA_DURATION_EXTRA_ARGS+=(--policy.hiva_residual_scale_grip="${HIVA_RESIDUAL_SCALE_GRIP}")
+fi
+EVAL_EXTRA_ARGS=()
+if [[ -n "${EVAL_TASK_IDS}" ]]; then
+  EVAL_EXTRA_ARGS+=(--env.task_ids="${EVAL_TASK_IDS}")
+fi
+
+TRAIN_ARGS=(
+  --policy.type=smolvla_hiva_coeff
+  --policy.push_to_hub=false
+  --policy.load_vlm_weights=false
+  --policy.init_smolvla_checkpoint_path="${INIT_SMOLVLA}"
+  --policy.hiva_coeff_sidecar_path="${SIDECAR}"
+  --policy.hiva_coeff_sidecar_summary_path="${SIDECAR_SUMMARY}"
+  --policy.hiva_duration_classes="${HIVA_DURATION_CLASSES}"
+  --policy.hiva_dmax="${HIVA_DMAX}"
+  --policy.hiva_fit_horizon="${HIVA_FIT_HORIZON}"
+  --policy.hiva_k="${HIVA_K}"
+  --policy.hiva_degree="${HIVA_DEGREE}"
+  --policy.hiva_tr_loss_weight="${HIVA_TR_LOSS_WEIGHT}"
+  --policy.hiva_rot_loss_weight="${HIVA_ROT_LOSS_WEIGHT}"
+  --policy.hiva_grip_loss_weight="${HIVA_GRIP_LOSS_WEIGHT}"
+  --policy.hiva_duration_noisy_loss_weight="${HIVA_DURATION_NOISY_LOSS_WEIGHT}"
+  --policy.hiva_duration_clean_loss_weight="${HIVA_DURATION_CLEAN_LOSS_WEIGHT}"
+  --policy.hiva_duration_noisy_sigma="${HIVA_DURATION_NOISY_SIGMA}"
+  --policy.hiva_duration_loss="${HIVA_DURATION_LOSS}"
+  --policy.hiva_duration_prediction_type="${HIVA_DURATION_PREDICTION_TYPE}"
+  --policy.hiva_duration_readout="${HIVA_DURATION_READOUT}"
+  --policy.hiva_duration_fm_loss_weight="${HIVA_DURATION_FM_LOSS_WEIGHT}"
+  --policy.hiva_duration_cont_norm="${HIVA_DURATION_CONT_NORM}"
+  --policy.hiva_suffix_attention="${HIVA_SUFFIX_ATTENTION}"
+  --policy.hiva_basis_mode="${HIVA_BASIS_MODE}"
+  --policy.hiva_duration_head_type="${HIVA_DURATION_HEAD_TYPE}"
+  --policy.hiva_duration_ffn_hidden_mult="${HIVA_DURATION_FFN_HIDDEN_MULT}"
+  --policy.hiva_duration_ffn_alpha_init="${HIVA_DURATION_FFN_ALPHA_INIT}"
+  --policy.hiva_decoded_action_loss_weight="${HIVA_DECODED_ACTION_LOSS_WEIGHT}"
+  --policy.hiva_decoded_tr_loss_weight="${HIVA_DECODED_TR_LOSS_WEIGHT}"
+  --policy.hiva_decoded_rot_loss_weight="${HIVA_DECODED_ROT_LOSS_WEIGHT}"
+  --policy.hiva_decoded_grip_loss_weight="${HIVA_DECODED_GRIP_LOSS_WEIGHT}"
+  --policy.hiva_decoded_prefix_weight="${HIVA_DECODED_PREFIX_WEIGHT}"
+  --policy.hiva_decoded_post_duration_exec_weight="${HIVA_DECODED_POST_DURATION_EXEC_WEIGHT}"
+  --policy.hiva_decoded_preview_weight="${HIVA_DECODED_PREVIEW_WEIGHT}"
+  --policy.hiva_decoded_terminal_weight="${HIVA_DECODED_TERMINAL_WEIGHT}"
+  --policy.hiva_decoded_loss_beta="${HIVA_DECODED_LOSS_BETA}"
+  --policy.hiva_residual_enabled="${HIVA_RESIDUAL_ENABLED}"
+  --policy.hiva_residual_horizon="${HIVA_RESIDUAL_HORIZON}"
+  --policy.hiva_residual_ffn_hidden_mult="${HIVA_RESIDUAL_FFN_HIDDEN_MULT}"
+  --policy.hiva_residual_token_time_hidden_mult="${HIVA_RESIDUAL_TOKEN_TIME_HIDDEN_MULT}"
+  --policy.hiva_residual_alpha_init="${HIVA_RESIDUAL_ALPHA_INIT}"
+  --policy.hiva_residual_zero_init="${HIVA_RESIDUAL_ZERO_INIT}"
+  --batch_size="${BATCH_SIZE}"
+  --steps="${STEPS}"
+  --log_freq=1
+  --save_checkpoint=true
+  --save_freq="${SAVE_FREQ}"
+  --num_workers=0
+  --policy.scheduler_warmup_steps="${SCHEDULER_WARMUP_STEPS}"
+  --policy.scheduler_decay_steps="${SCHEDULER_DECAY_STEPS}"
+  --policy.scheduler_decay_lr="${SCHEDULER_DECAY_LR}"
+  --policy.device=cuda
+  --policy.num_steps=10
+  --policy.chunk_size="${POLICY_CHUNK_SIZE}"
+  --policy.n_action_steps="${POLICY_N_ACTION_STEPS}"
+  --dataset.repo_id="${DATA_REPO_ID}"
+  --dataset.root="${DATA_ROOT}"
+  --rename_map='{"observation.images.agentview":"observation.images.image","observation.images.wrist":"observation.images.image2"}'
+  --env.type=libero
+  --env.control_mode=relative
+  --env.task="${TASKS}"
+  --env.max_parallel_tasks="${EVAL_MAX_PARALLEL_TASKS}"
+  --output_dir="${OUTPUT_DIR}"
+  --job_name="${RUN_NAME}"
+  --resume="${RESUME}"
+  --eval.batch_size="${EVAL_BATCH_SIZE}"
+  --eval.n_episodes="${EVAL_N_EPISODES}"
+  --eval_freq="${EVAL_FREQ}"
+)
+TRAIN_ARGS+=("${HIVA_DURATION_EXTRA_ARGS[@]}")
+TRAIN_ARGS+=("${EVAL_EXTRA_ARGS[@]}")
+TRAIN_ARGS+=("${WANDB_ARGS[@]}")
 
 "${ACCELERATE_BIN}" launch \
   --num_processes="${NUM_PROCESSES}" \
   --mixed_precision=bf16 \
   "${LEROBOT_TRAIN_BIN}" \
-  --policy.type=smolvla_hiva_coeff \
-  --policy.push_to_hub=false \
-  --policy.load_vlm_weights=false \
-  --policy.init_smolvla_checkpoint_path="${INIT_SMOLVLA}" \
-  --policy.hiva_coeff_sidecar_path="${SIDECAR}" \
-  --policy.hiva_coeff_sidecar_summary_path="${SIDECAR_SUMMARY}" \
-  --policy.hiva_duration_classes='[6,10,15]' \
-  --policy.hiva_dmax="${HIVA_DMAX}" \
-  --policy.hiva_k="${HIVA_K}" \
-  --policy.hiva_degree="${HIVA_DEGREE}" \
-  --policy.hiva_tr_loss_weight="${HIVA_TR_LOSS_WEIGHT}" \
-  --policy.hiva_rot_loss_weight="${HIVA_ROT_LOSS_WEIGHT}" \
-  --policy.hiva_grip_loss_weight="${HIVA_GRIP_LOSS_WEIGHT}" \
-  --policy.hiva_duration_noisy_loss_weight="${HIVA_DURATION_NOISY_LOSS_WEIGHT}" \
-  --policy.hiva_duration_noisy_sigma="${HIVA_DURATION_NOISY_SIGMA}" \
-  --policy.hiva_duration_loss="${HIVA_DURATION_LOSS}" \
-  --policy.hiva_suffix_attention="${HIVA_SUFFIX_ATTENTION}" \
-  --policy.hiva_basis_mode="${HIVA_BASIS_MODE}" \
-  --batch_size="${BATCH_SIZE}" \
-  --steps="${STEPS}" \
-  --log_freq=1 \
-  --save_checkpoint=true \
-  --save_freq="${SAVE_FREQ}" \
-  --num_workers=0 \
-  --policy.scheduler_warmup_steps="${SCHEDULER_WARMUP_STEPS}" \
-  --policy.scheduler_decay_steps="${SCHEDULER_DECAY_STEPS}" \
-  --policy.scheduler_decay_lr="${SCHEDULER_DECAY_LR}" \
-  --policy.device=cuda \
-  --policy.num_steps=10 \
-  --policy.chunk_size=15 \
-  --policy.n_action_steps=15 \
-  --dataset.repo_id="${DATA_REPO_ID}" \
-  --dataset.root="${DATA_ROOT}" \
-  --rename_map='{"observation.images.agentview":"observation.images.image","observation.images.wrist":"observation.images.image2"}' \
-  --env.type=libero \
-  --env.control_mode=relative \
-  --env.task="${TASKS}" \
-  --output_dir="${OUTPUT_DIR}" \
-  --job_name="${RUN_NAME}" \
-  --resume="${RESUME}" \
-  --eval.batch_size=1 \
-  --eval.n_episodes=1 \
-  --eval_freq="${EVAL_FREQ}" \
-  "${WANDB_ARGS[@]}"
+  "${TRAIN_ARGS[@]}"

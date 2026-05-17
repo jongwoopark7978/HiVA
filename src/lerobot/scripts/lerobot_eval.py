@@ -104,6 +104,8 @@ def _draw_duration_eval_overlay(
     total_time_s: float | None = None,
     success: bool | None = None,
     task_prompt: str | None = None,
+    frame_index: int | None = None,
+    total_frames: int | None = None,
 ) -> np.ndarray:
     image = Image.fromarray(image_np.astype(np.uint8))
     draw = ImageDraw.Draw(image, "RGBA")
@@ -114,9 +116,12 @@ def _draw_duration_eval_overlay(
     total_time_text = "-" if total_time_s is None else f"{total_time_s:.1f}s"
     success_text = "SC=?" if success is None else ("SC" if success else "FA")
     prompt_lines = textwrap.wrap(task_prompt, width=42) if task_prompt else []
+    frame_text = None
+    if frame_index is not None and total_frames is not None:
+        frame_text = f"FR={int(frame_index)}/{max(int(total_frames) - 1, 0)}"
     lines = [
         *prompt_lines,
-        f"D={duration_text} INF={inference_call}",
+        f"D={duration_text} INF={inference_call}" + (f" {frame_text}" if frame_text else ""),
         f"MD={mean_duration_text} TT={total_time_text}",
         success_text,
     ]
@@ -133,7 +138,29 @@ def _draw_duration_eval_overlay(
     return np.asarray(image)
 
 
-def _policy_duration_overlay_info(policy: PreTrainedPolicy) -> dict[str, Any]:
+def _policy_duration_overlay_info(policy: PreTrainedPolicy, env_ix: int | None = None) -> dict[str, Any]:
+    if env_ix is not None:
+        histories = getattr(policy, "_execution_horizon_histories", None)
+        counts = getattr(policy, "_duration_inference_counts_by_env", None)
+        sums = getattr(policy, "_execution_horizon_sums_by_env", None)
+        last_horizons = getattr(policy, "_last_execution_horizons", None)
+        if histories is not None and 0 <= env_ix < len(histories):
+            duration_sequence = [int(value) for value in histories[env_ix]]
+            inference_call = int(counts[env_ix]) if counts is not None else len(duration_sequence)
+            horizon_sum = float(sums[env_ix]) if sums is not None else float(sum(duration_sequence))
+            duration = (
+                int(last_horizons[env_ix])
+                if last_horizons is not None and last_horizons[env_ix] is not None
+                else None
+            )
+            mean_duration = horizon_sum / inference_call if inference_call > 0 else None
+            return {
+                "duration": duration,
+                "duration_sequence": duration_sequence,
+                "inference_call": inference_call,
+                "mean_duration": mean_duration,
+            }
+
     duration = getattr(policy, "_last_execution_horizon", None)
     inference_call = int(getattr(policy, "_duration_inference_count", 0))
     horizon_sum = float(getattr(policy, "_execution_horizon_sum", 0))
@@ -154,6 +181,8 @@ def _draw_policy_duration_overlay(
     total_time_s: float | None = None,
     success: bool | None = None,
     task_prompt: str | None = None,
+    frame_index: int | None = None,
+    total_frames: int | None = None,
 ) -> np.ndarray:
     return _draw_duration_eval_overlay(
         image_np,
@@ -163,6 +192,8 @@ def _draw_policy_duration_overlay(
         total_time_s=total_time_s,
         success=success,
         task_prompt=task_prompt,
+        frame_index=frame_index,
+        total_frames=total_frames,
     )
 
 
@@ -447,8 +478,9 @@ def eval_policy(
             raise ValueError(f"Unsupported vector env type for rendering: {type(env)}.")
         frames = frames[:n_to_render_now]
         ep_frames.append(np.stack(frames))
-        overlay_info = _policy_duration_overlay_info(policy)
-        ep_overlay_infos.append([overlay_info.copy() for _ in frames])
+        ep_overlay_infos.append(
+            [_policy_duration_overlay_info(policy, env_ix=env_ix).copy() for env_ix in range(len(frames))]
+        )
 
     if max_episodes_rendered > 0:
         video_paths: list[str] = []
@@ -513,7 +545,7 @@ def eval_policy(
                 if env_ix < len(ep_overlay_infos[final_step_ix]):
                     final_overlay_info = ep_overlay_infos[final_step_ix][env_ix]
             if final_overlay_info is None:
-                final_overlay_info = _policy_duration_overlay_info(policy)
+                final_overlay_info = _policy_duration_overlay_info(policy, env_ix=env_ix)
 
             total_time_s = float(rollout_data["episode_total_time_s"][env_ix].item())
             episode_display_metrics.append(
@@ -565,16 +597,21 @@ def eval_policy(
                 video_path = videos_dir / f"eval_episode_{n_episodes_rendered}.mp4"
                 video_paths.append(str(video_path))
                 frame_infos = [step_infos[env_ix] for step_infos in ep_overlay_infos[: done_index + 1]]
+                total_video_frames = done_index + 1
                 frames_with_overlay = np.stack(
                     [
                         _draw_policy_duration_overlay(
-                        frame,
-                        info,
-                        total_time_s=float(total_time_s),
-                        success=bool(success),
-                        task_prompt=task_prompt,
-                    )
-                        for frame, info in zip(stacked_frames[: done_index + 1], frame_infos, strict=False)
+                            frame,
+                            info,
+                            total_time_s=float(total_time_s),
+                            success=bool(success),
+                            task_prompt=task_prompt,
+                            frame_index=frame_ix,
+                            total_frames=total_video_frames,
+                        )
+                        for frame_ix, (frame, info) in enumerate(
+                            zip(stacked_frames[:total_video_frames], frame_infos, strict=False)
+                        )
                     ]
                 )
                 thread = threading.Thread(

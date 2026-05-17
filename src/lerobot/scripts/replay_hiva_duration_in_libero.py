@@ -82,6 +82,9 @@ OPTIONAL_SIDECAR_COLS = (
     "hiva_basis_dmax",
     "hiva_basis_k",
     "hiva_basis_degree",
+    "hiva_basis_degree_tr",
+    "hiva_basis_degree_rot",
+    "hiva_basis_degree_grip",
     "hiva_prefix_action_rmse",
     "hiva_prefix_action_max_abs_diff",
     "hiva_real_prefix_action_rmse",
@@ -388,18 +391,23 @@ def decode_hiva_segment_actions(side_row: dict[str, Any]) -> np.ndarray:
     theta_grip = np.asarray(side_row["hiva_theta_grip_raw"], dtype=np.float64)
     n_ctrl = int(side_row.get("hiva_basis_k", side_row.get("hiva_k", theta_tr.shape[0])))
     degree = int(side_row.get("hiva_basis_degree", side_row.get("hiva_degree", 3)))
+    degree_tr = int(side_row.get("hiva_basis_degree_tr", degree))
+    degree_rot = int(side_row.get("hiva_basis_degree_rot", degree))
+    degree_grip = int(side_row.get("hiva_basis_degree_grip", degree))
     eta = float(side_row.get("hiva_rot_scale_eta", 0.5))
     basis_mode = str(side_row.get("hiva_basis_mode", "duration_specific"))
     basis_horizon = (
         int(side_row.get("hiva_basis_dmax", duration))
-        if basis_mode in {"canonical_hp", "canonical_mt"}
+        if basis_mode in {"canonical_hp", "canonical_mt", "canonical_lp_mt"}
         else duration
     )
 
-    phi = clamped_bspline_basis(basis_horizon, n_ctrl=n_ctrl, degree=degree)
-    p_tr = phi @ theta_tr
-    rho_rot = phi @ theta_rot
-    g_grip = phi @ theta_grip
+    phi_tr = clamped_bspline_basis(basis_horizon, n_ctrl=n_ctrl, degree=degree_tr)
+    phi_rot = clamped_bspline_basis(basis_horizon, n_ctrl=n_ctrl, degree=degree_rot)
+    phi_grip = clamped_bspline_basis(basis_horizon, n_ctrl=n_ctrl, degree=degree_grip)
+    p_tr = phi_tr @ theta_tr
+    rho_rot = phi_rot @ theta_rot
+    g_grip = phi_grip @ theta_grip
 
     tr = np.diff(np.concatenate([np.zeros((1, 3), dtype=np.float64), p_tr], axis=0), axis=0)
     rot = decode_rotation_to_raw_actions(rho_rot, eta=eta)
@@ -439,6 +447,25 @@ def decoded_actions_for_episode(
                 "hiva_real_steps": int(side_row.get("hiva_real_steps", segment["duration"])),
                 "hiva_has_synthetic_tail": int(side_row.get("hiva_has_synthetic_tail", 0)),
                 "basis_mode": str(side_row.get("hiva_basis_mode", "duration_specific")),
+                "basis_degree": int(side_row.get("hiva_basis_degree", side_row.get("hiva_degree", 3))),
+                "basis_degree_tr": int(
+                    side_row.get(
+                        "hiva_basis_degree_tr",
+                        side_row.get("hiva_basis_degree", side_row.get("hiva_degree", 3)),
+                    )
+                ),
+                "basis_degree_rot": int(
+                    side_row.get(
+                        "hiva_basis_degree_rot",
+                        side_row.get("hiva_basis_degree", side_row.get("hiva_degree", 3)),
+                    )
+                ),
+                "basis_degree_grip": int(
+                    side_row.get(
+                        "hiva_basis_degree_grip",
+                        side_row.get("hiva_basis_degree", side_row.get("hiva_degree", 3)),
+                    )
+                ),
                 "stored_action_rmse": float(
                     side_row.get("hiva_prefix_action_rmse", side_row.get("hiva_action_rmse", -1.0))
                 ),
