@@ -56,8 +56,8 @@ CONDA_ENV_BIN="${CONDA_ENV_BIN:-/home/jongwoopark/miniconda3/envs/smolvla_libero
 export PATH="${CONDA_ENV_BIN}:${PATH}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 N_ACTION_STEPS="${N_ACTION_STEPS:-15}"
 CHUNK_SIZE="${CHUNK_SIZE:-15}"
@@ -165,98 +165,284 @@ write_summary() {
   BASE_OUTPUT_DIR="${BASE_OUTPUT_DIR}" \
   EXPECTED_EPISODE_COUNT="${EXPECTED_EPISODE_COUNT}" \
   EXPECTED_VIDEO_COUNT="${EXPECTED_VIDEO_COUNT}" \
+  N_ACTION_STEPS="${N_ACTION_STEPS}" \
   python - <<'PY'
+import csv
 import json
+import math
 import os
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 
 base = Path(os.environ["BASE_OUTPUT_DIR"])
 expected_episode_count = int(os.environ["EXPECTED_EPISODE_COUNT"])
 expected_video_count = int(os.environ["EXPECTED_VIDEO_COUNT"])
+n_action_steps = int(os.environ["N_ACTION_STEPS"])
 eval_infos = sorted(base.glob("*/eval_info.json"))
 
 per_task = []
 episodes = []
 video_paths = []
-group_video_paths = {}
+group_video_paths = defaultdict(list)
+
+def number(value):
+    if value is None:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(value) else value
+
+def horizon_key(value):
+    value = number(value)
+    if value is None:
+        return None
+    return str(int(value)) if value.is_integer() else str(value)
+
 for path in eval_infos:
     info = json.loads(path.read_text())
-    for task_info in info.get("per_task", []):
-        per_task.append(task_info)
-        for episode in task_info.get("metrics", {}).get("episode_metrics", []):
-            episode = dict(episode)
-            episode["task_group"] = task_info.get("task_group")
-            episode["task_id"] = task_info.get("task_id")
-            episode["task_prompt"] = task_info.get("task_prompt") or episode.get("display_metrics", {}).get("task_prompt")
-            episodes.append(episode)
+    per_task.extend(info.get("per_task", []))
     group_names = list(info.get("per_group", {}).keys())
     if len(group_names) == 1:
-        group_video_paths.setdefault(group_names[0], []).extend(info.get("overall", {}).get("video_paths", []))
+        group_video_paths[group_names[0]].extend(info.get("overall", {}).get("video_paths", []))
     video_paths.extend(info.get("overall", {}).get("video_paths", []))
+    for task_info in info.get("per_task", []):
+        suite = task_info.get("task_group")
+        task_id = task_info.get("task_id")
+        task_prompt = task_info.get("task_prompt")
+        for episode in task_info.get("metrics", {}).get("episode_metrics", []):
+            display = episode.get("display_metrics", {}) or {}
+            success = bool(episode.get("success"))
+            duration_sequence = display.get("duration") or []
+            action_horizon_call_counts = Counter(
+                key for key in (horizon_key(value) for value in duration_sequence) if key is not None
+            )
+            model_inference_calls = display.get("inference_calls")
+            model_forward_latency_s = display.get("model_forward_latency_s")
+            mean_model_forward_latency_s = display.get("mean_model_forward_latency_s")
+            model_forward_latency_sequence_s = display.get("model_forward_latency_sequence_s") or []
+            total_executed_actions = sum(number(value) or 0.0 for value in duration_sequence)
+            avg_executed_action_horizon_per_call = (
+                total_executed_actions / float(model_inference_calls)
+                if number(model_inference_calls)
+                else None
+            )
+            episodes.append({
+                "n_action_steps": n_action_steps,
+                "suite": suite,
+                "task_group": suite,
+                "task_id": task_id,
+                "episode_ix": episode.get("episode_ix"),
+                "task_prompt": task_prompt or display.get("task_prompt"),
+                "success": success,
+                "accuracy": 1.0 if success else 0.0,
+                "sum_reward": episode.get("sum_reward"),
+                "max_reward": episode.get("max_reward"),
+                "seed": episode.get("seed"),
+                "total_completion_time_s": display.get("total_time_s"),
+                "model_inference_calls": model_inference_calls,
+                "model_forward_latency_s": model_forward_latency_s,
+                "mean_model_forward_latency_s": mean_model_forward_latency_s,
+                "model_forward_latency_sequence_s": model_forward_latency_sequence_s,
+                "total_executed_actions": total_executed_actions,
+                "avg_executed_action_horizon_per_call": avg_executed_action_horizon_per_call,
+                "action_horizon_call_counts": dict(
+                    sorted(action_horizon_call_counts.items(), key=lambda item: number(item[0]) or 0.0)
+                ),
+                "action_jitter_metrics": display.get("action_jitter_metrics"),
+                "final_duration": (duration_sequence or [None])[-1],
+                "duration_sequence": duration_sequence,
+                "mean_duration": display.get("mean_duration"),
+            })
 
 
 def mean(values):
-    numeric = [float(value) for value in values if value is not None]
-    return sum(numeric) / len(numeric) if numeric else None
+    vals = [number(v) for v in values]
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / len(vals) if vals else None
 
-
-def final_duration(duration_sequence):
-    if not duration_sequence:
+def avg_calls_by_action_horizon(group_episodes):
+    if not group_episodes:
         return None
-    return duration_sequence[-1]
-
-
-def summarize_episodes(group_episodes, group_video_paths=None):
-    group_video_paths = group_video_paths or []
-    successes = [bool(ep.get("success")) for ep in group_episodes]
-    display_metrics = [ep.get("display_metrics", {}) for ep in group_episodes]
+    counts = Counter()
+    for ep in group_episodes:
+        counts.update(ep.get("action_horizon_call_counts", {}))
     return {
-        "avg_sum_reward": mean([ep.get("sum_reward") for ep in group_episodes]),
-        "avg_max_reward": mean([ep.get("max_reward") for ep in group_episodes]),
-        "pc_success": (sum(successes) / len(successes) * 100) if successes else None,
+        key: counts[key] / len(group_episodes)
+        for key in sorted(counts, key=lambda value: number(value) or 0.0)
+    }
+
+def avg_model_forward_latency_per_call(group_episodes):
+    latency_sum = 0.0
+    call_count = 0.0
+    for ep in group_episodes:
+        latency = number(ep.get("model_forward_latency_s"))
+        calls = number(ep.get("model_inference_calls"))
+        if latency is None or calls is None or calls <= 0:
+            continue
+        latency_sum += latency
+        call_count += calls
+    return latency_sum / call_count if call_count > 0 else None
+
+def avg_action_jitter_metrics(group_episodes):
+    grouped_values = defaultdict(lambda: defaultdict(list))
+    top_level_values = defaultdict(list)
+    for ep in group_episodes:
+        metrics = ep.get("action_jitter_metrics")
+        if not isinstance(metrics, dict):
+            continue
+        for key in ("n_actions", "action_dim", "boundary_count"):
+            value = number(metrics.get(key))
+            if value is not None:
+                top_level_values[key].append(value)
+        for group_name, group_metrics in (metrics.get("groups") or {}).items():
+            if not isinstance(group_metrics, dict):
+                continue
+            for metric_name, value in group_metrics.items():
+                value = number(value)
+                if value is not None:
+                    grouped_values[str(group_name)][str(metric_name)].append(value)
+    if not grouped_values and not top_level_values:
+        return None
+    return {
+        "n_episodes": sum(1 for ep in group_episodes if isinstance(ep.get("action_jitter_metrics"), dict)),
+        "mean_n_actions": mean(top_level_values.get("n_actions", [])),
+        "mean_action_dim": mean(top_level_values.get("action_dim", [])),
+        "mean_boundary_count": mean(top_level_values.get("boundary_count", [])),
+        "groups": {
+            group_name: {
+                metric_name: mean(values)
+                for metric_name, values in sorted(metric_values.items())
+            }
+            for group_name, metric_values in sorted(grouped_values.items())
+        },
+    }
+
+def summarize(group_episodes, videos=None):
+    videos = videos or []
+    success_eps = [ep for ep in group_episodes if ep["success"]]
+    failure_eps = [ep for ep in group_episodes if not ep["success"]]
+    accuracy = mean([ep["accuracy"] for ep in group_episodes])
+    total_calls = sum(number(ep["model_inference_calls"]) or 0.0 for ep in group_episodes)
+    success_calls = sum(number(ep["model_inference_calls"]) or 0.0 for ep in success_eps)
+    failure_calls = sum(number(ep["model_inference_calls"]) or 0.0 for ep in failure_eps)
+    total_executed_actions = sum(number(ep["total_executed_actions"]) or 0.0 for ep in group_episodes)
+    success_executed_actions = sum(number(ep["total_executed_actions"]) or 0.0 for ep in success_eps)
+    failure_executed_actions = sum(number(ep["total_executed_actions"]) or 0.0 for ep in failure_eps)
+    return {
         "n_episodes": len(group_episodes),
-        "mean_final_duration": mean([final_duration(m.get("duration")) for m in display_metrics]),
-        "mean_inference_calls": mean([m.get("inference_calls") for m in display_metrics]),
-        "mean_duration": mean([m.get("mean_duration") for m in display_metrics]),
-        "mean_total_time_s": mean([m.get("total_time_s") for m in display_metrics]),
+        "n_success_episodes": len(success_eps),
+        "n_failure_episodes": len(failure_eps),
+        "accuracy": accuracy,
+        "accuracy_percent": accuracy * 100 if accuracy is not None else None,
+        "avg_total_completion_time_all_episodes_s": mean([ep["total_completion_time_s"] for ep in group_episodes]),
+        "avg_model_inference_calls_all_episodes": mean([ep["model_inference_calls"] for ep in group_episodes]),
+        "avg_model_forward_latency_per_call_all_episodes_s": avg_model_forward_latency_per_call(group_episodes),
+        "avg_action_jitter_metrics_all_episodes": avg_action_jitter_metrics(group_episodes),
+        "avg_executed_action_horizon_per_call_all_episodes": (
+            total_executed_actions / total_calls if total_calls > 0 else None
+        ),
+        "avg_model_inference_calls_by_action_horizon_all_episodes": avg_calls_by_action_horizon(group_episodes),
+        "avg_total_completion_time_success_episodes_s": mean([ep["total_completion_time_s"] for ep in success_eps]),
+        "avg_model_inference_calls_success_episodes": mean([ep["model_inference_calls"] for ep in success_eps]),
+        "avg_model_forward_latency_per_call_success_episodes_s": avg_model_forward_latency_per_call(success_eps),
+        "avg_action_jitter_metrics_success_episodes": avg_action_jitter_metrics(success_eps),
+        "avg_executed_action_horizon_per_call_success_episodes": (
+            success_executed_actions / success_calls if success_calls > 0 else None
+        ),
+        "avg_model_inference_calls_by_action_horizon_success_episodes": avg_calls_by_action_horizon(success_eps),
+        "avg_total_completion_time_failure_episodes_s": mean([ep["total_completion_time_s"] for ep in failure_eps]),
+        "avg_model_inference_calls_failure_episodes": mean([ep["model_inference_calls"] for ep in failure_eps]),
+        "avg_model_forward_latency_per_call_failure_episodes_s": avg_model_forward_latency_per_call(failure_eps),
+        "avg_action_jitter_metrics_failure_episodes": avg_action_jitter_metrics(failure_eps),
+        "avg_executed_action_horizon_per_call_failure_episodes": (
+            failure_executed_actions / failure_calls if failure_calls > 0 else None
+        ),
+        "avg_model_inference_calls_by_action_horizon_failure_episodes": avg_calls_by_action_horizon(failure_eps),
         "task_prompts": sorted({ep.get("task_prompt") for ep in group_episodes if ep.get("task_prompt")}),
         "episode_metrics": group_episodes,
-        "video_paths": group_video_paths,
+        "video_paths": videos,
     }
 
 
-episodes_by_group = {}
-for episode in episodes:
-    episodes_by_group.setdefault(episode.get("task_group"), []).append(episode)
-per_group = {
-    group: summarize_episodes(group_episodes, group_video_paths.get(group, []))
-    for group, group_episodes in sorted(episodes_by_group.items())
-}
+task_groups = defaultdict(list)
+suite_groups = defaultdict(list)
+for ep in episodes:
+    task_groups[f"{ep['suite']}/task_{ep['task_id']}"].append(ep)
+    suite_groups[str(ep["suite"])].append(ep)
 
-successes = [bool(ep.get("success")) for ep in episodes]
-display_metrics = [ep.get("display_metrics", {}) for ep in episodes]
 summary = {
+    "n_action_steps": n_action_steps,
+    "base_output_dir": str(base),
+    "eval_info_files": [str(path) for path in eval_infos],
     "per_task": per_task,
-    "per_group": per_group,
+    "per_group": {suite: summarize(eps, group_video_paths.get(suite, [])) for suite, eps in sorted(suite_groups.items())},
+    "task_level": {name: summarize(eps) for name, eps in sorted(task_groups.items())},
+    "suite_level": {suite: summarize(eps, group_video_paths.get(suite, [])) for suite, eps in sorted(suite_groups.items())},
+    "all_suites_level": summarize(episodes, video_paths),
     "overall": {
+        **summarize(episodes, video_paths),
         "n_episodes": len(episodes),
-        "pc_success": (sum(successes) / len(successes) * 100) if successes else None,
-        "mean_final_duration": mean([final_duration(m.get("duration")) for m in display_metrics]),
-        "mean_inference_calls": mean([m.get("inference_calls") for m in display_metrics]),
-        "mean_duration": mean([m.get("mean_duration") for m in display_metrics]),
-        "mean_total_time_s": mean([m.get("total_time_s") for m in display_metrics]),
-        "task_prompts": sorted({ep.get("task_prompt") for ep in episodes if ep.get("task_prompt")}),
-        "episode_metrics": episodes,
-        "video_paths": video_paths,
+        "pc_success": (sum(1 for ep in episodes if ep["success"]) / len(episodes) * 100) if episodes else None,
         "n_video_paths": len(video_paths),
     },
 }
 
-summary_path = base / "overlay_eval_summary.json"
-summary_path.write_text(json.dumps(summary, indent=2))
-print(f"Wrote combined overlay summary: {summary_path}")
-print(f"Collected {len(episodes)} episodes and {len(video_paths)} video paths.")
+(base / "episode_metrics.json").write_text(json.dumps(episodes, indent=2))
+(base / "metrics_summary.json").write_text(json.dumps(summary, indent=2))
+(base / "overlay_eval_summary.json").write_text(json.dumps(summary, indent=2))
+
+csv_path = base / "metrics_summary.csv"
+fieldnames = [
+    "level",
+    "name",
+    "n_episodes",
+    "n_success_episodes",
+    "n_failure_episodes",
+    "accuracy_percent",
+    "avg_total_completion_time_all_episodes_s",
+    "avg_model_inference_calls_all_episodes",
+    "avg_model_forward_latency_per_call_all_episodes_s",
+    "avg_action_jitter_metrics_all_episodes",
+    "avg_executed_action_horizon_per_call_all_episodes",
+    "avg_model_inference_calls_by_action_horizon_all_episodes",
+    "avg_total_completion_time_success_episodes_s",
+    "avg_model_inference_calls_success_episodes",
+    "avg_model_forward_latency_per_call_success_episodes_s",
+    "avg_action_jitter_metrics_success_episodes",
+    "avg_executed_action_horizon_per_call_success_episodes",
+    "avg_model_inference_calls_by_action_horizon_success_episodes",
+    "avg_total_completion_time_failure_episodes_s",
+    "avg_model_inference_calls_failure_episodes",
+    "avg_model_forward_latency_per_call_failure_episodes_s",
+    "avg_action_jitter_metrics_failure_episodes",
+    "avg_executed_action_horizon_per_call_failure_episodes",
+    "avg_model_inference_calls_by_action_horizon_failure_episodes",
+]
+
+def csv_value(value):
+    if isinstance(value, dict):
+        return json.dumps(value)
+    return value
+
+with csv_path.open("w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    for level, groups in [
+        ("task", summary["task_level"]),
+        ("suite", summary["suite_level"]),
+        ("all_suites", {"all_suites": summary["all_suites_level"]}),
+    ]:
+        for name, metrics in groups.items():
+            row = {key: csv_value(metrics.get(key)) for key in fieldnames}
+            row["level"] = level
+            row["name"] = name
+            writer.writerow(row)
+
+print(f"Wrote {base / 'overlay_eval_summary.json'}")
+print(f"Collected {len(episodes)} episodes and {len(video_paths)} video paths from {len(eval_infos)} eval_info files.")
 if expected_episode_count >= 0 and len(episodes) != expected_episode_count:
     print(f"Expected {expected_episode_count} episodes, but collected {len(episodes)}.", file=sys.stderr)
     sys.exit(2)

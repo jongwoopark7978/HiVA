@@ -109,8 +109,8 @@ export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 export PATH="${CONDA_ENV_BIN}:${PATH}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 for required_path in "${DATA_ROOT}" "${SIDECAR}" "${SIDECAR_SUMMARY}" "${INIT_SMOLVLA}"; do
   if [[ ! -e "${required_path}" ]]; then

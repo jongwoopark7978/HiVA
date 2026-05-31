@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import time
 from collections import deque
 from pathlib import Path
 from typing import TypedDict, Unpack
@@ -1027,6 +1028,10 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self._execution_horizon_sums_by_env = None
         self._execution_horizon_history = []
         self._execution_horizon_histories = None
+        self._model_forward_latency_sum_s = 0.0
+        self._model_forward_latency_sums_by_env = None
+        self._model_forward_latency_history_s = []
+        self._model_forward_latency_histories_s = None
 
     def _parse_duration_execution_map(self) -> dict[int, int]:
         raw_map = self.config.hiva_duration_execution_map
@@ -1073,6 +1078,8 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self._duration_inference_counts_by_env = [0 for _ in range(batch_size)]
         self._execution_horizon_sums_by_env = [0 for _ in range(batch_size)]
         self._execution_horizon_histories = [[] for _ in range(batch_size)]
+        self._model_forward_latency_sums_by_env = [0.0 for _ in range(batch_size)]
+        self._model_forward_latency_histories_s = [[] for _ in range(batch_size)]
 
     def _duration_steps_for_execution(self, duration_steps: Tensor) -> Tensor:
         execution_steps = duration_steps.reshape(-1).to(dtype=torch.long)
@@ -1093,11 +1100,15 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         max_horizon = min(actions.shape[1], int(self.config.n_action_steps))
         return execution_steps.clamp(min=1, max=max_horizon).to(dtype=torch.long)
 
-    def _record_execution_horizon(self, env_ix: int, horizon: int) -> None:
+    def _record_execution_horizon(self, env_ix: int, horizon: int, latency_s: float | None = None) -> None:
         self._last_execution_horizon = horizon
         self._duration_inference_count += 1
         self._execution_horizon_sum += horizon
         self._execution_horizon_history.append(horizon)
+        if latency_s is not None:
+            latency_s = float(latency_s)
+            self._model_forward_latency_sum_s += latency_s
+            self._model_forward_latency_history_s.append(latency_s)
 
         if self._last_execution_horizons is None:
             return
@@ -1105,6 +1116,20 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self._duration_inference_counts_by_env[env_ix] += 1
         self._execution_horizon_sums_by_env[env_ix] += horizon
         self._execution_horizon_histories[env_ix].append(horizon)
+        if latency_s is not None and self._model_forward_latency_sums_by_env is not None:
+            self._model_forward_latency_sums_by_env[env_ix] += latency_s
+            self._model_forward_latency_histories_s[env_ix].append(latency_s)
+
+    def _timed_get_action_chunk(
+        self, batch: dict[str, Tensor], noise: dict[str, Tensor] | None = None, **kwargs: Unpack[ActionSelectKwargs]
+    ) -> tuple[tuple[Tensor, Tensor], float]:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+        model_output = self._get_action_chunk(batch, noise, **kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return model_output, time.perf_counter() - start
 
     def _get_action_chunk(
         self, batch: dict[str, Tensor], noise: dict[str, Tensor] | None = None, **kwargs: Unpack[ActionSelectKwargs]
@@ -1134,7 +1159,9 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self.eval()
         batch = self._prepare_batch(batch)
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
-        actions, _duration_steps = self._get_action_chunk(batch, noise, **kwargs)
+        (actions, _duration_steps), latency_s = self._timed_get_action_chunk(batch, noise, **kwargs)
+        self._model_forward_latency_sum_s += float(latency_s)
+        self._model_forward_latency_history_s.append(float(latency_s))
         return actions
 
     @torch.no_grad()
@@ -1153,7 +1180,7 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
             env_ix for env_ix, queue in enumerate(self._per_env_action_queues) if len(queue) == 0
         ]
         if empty_envs:
-            actions, duration_steps = self._get_action_chunk(batch, noise)
+            (actions, duration_steps), latency_s = self._timed_get_action_chunk(batch, noise)
             execution_horizons = self._execution_horizons_from_duration(duration_steps, actions)
             if execution_horizons.numel() != len(self._per_env_action_queues):
                 raise ValueError(
@@ -1163,7 +1190,7 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
                 )
             for env_ix in empty_envs:
                 horizon = int(execution_horizons[env_ix].item())
-                self._record_execution_horizon(env_ix, horizon)
+                self._record_execution_horizon(env_ix, horizon, latency_s)
                 self._per_env_action_queues[env_ix].extend(actions[env_ix, :horizon])
 
         return torch.stack([queue.popleft() for queue in self._per_env_action_queues], dim=0)
@@ -1969,8 +1996,11 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
                     continue
 
                 end = start + hidden_states.shape[1]
-                if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
-                    att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
+                layer_dtype = layer.self_attn.o_proj.weight.dtype
+                if hidden_states.dtype != layer_dtype:
+                    hidden_states = hidden_states.to(dtype=layer_dtype)
+                if att_output.dtype != layer_dtype:
+                    att_output = att_output.to(dtype=layer_dtype)
                 att_out = att_output[:, start:end]
                 out_emb = layer.self_attn.o_proj(att_out)
                 out_emb = out_emb + hidden_states
@@ -2258,9 +2288,9 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
         decoded_per_step = decoded_per_dim.mean(dim=-1)
         decoded_loss = (decoded_per_step * valid_float).sum(dim=1) / denom
 
-        # Extra logging mirrors the deterministic Stage-1 decoded-action diagnostics.
-        # The residual-flow training loss above remains unchanged: these statistics only
-        # decompose the auxiliary decoded loss by modality and action-time region.
+        # Logging-only breakdown of the auxiliary decoded loss. The residual-flow
+        # objective above is unchanged; these metrics expose modality and region
+        # scales with the same region definitions as the deterministic decoded loss.
         tau = torch.arange(1, horizon + 1, device=time.device)[None, :]
         d_star = duration_label_target.to(device=time.device, dtype=torch.long).reshape(-1, 1)
         prefix_mask = tau <= d_star
@@ -2279,15 +2309,15 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
             beta=float(self.config.hiva_residual_flow_decoded_loss_beta),
         )
 
-        def residual_flow_modality_per_step(per_dim: Tensor, start: int, end: int) -> Tensor:
+        def modality_per_step(per_dim: Tensor, start: int, end: int) -> Tensor:
             if start >= action_dim:
                 return torch.zeros(bsize, horizon, dtype=per_dim.dtype, device=per_dim.device)
             end = min(end, action_dim)
             return per_dim[..., start:end].mean(dim=-1)
 
-        tr_per_step = residual_flow_modality_per_step(decoded_region_per_dim, 0, 3)
-        rot_per_step = residual_flow_modality_per_step(decoded_region_per_dim, 3, 6)
-        grip_per_step = residual_flow_modality_per_step(decoded_region_per_dim, 6, 7)
+        tr_per_step = modality_per_step(decoded_region_per_dim, 0, 3)
+        rot_per_step = modality_per_step(decoded_region_per_dim, 3, 6)
+        grip_per_step = modality_per_step(decoded_region_per_dim, 6, 7)
         tr_decoded = (tr_per_step * valid_float).sum(dim=1) / denom
         rot_decoded = (rot_per_step * valid_float).sum(dim=1) / denom
         grip_decoded = (grip_per_step * valid_float).sum(dim=1) / denom

@@ -62,8 +62,8 @@ DATA_REPO_ID="${DATA_REPO_ID:-local/libero_lerobot_v3_lerobotkeys}"
 TASKS="${TASKS:-libero_spatial,libero_object,libero_goal,libero_10}"
 PRETRAINED="${PRETRAINED:-/home/jongwoopark/lerobot/smolvla_libero}"
 
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 RUN_PREFIX="${RUN_PREFIX:-smolvla_original_bigcornea}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/outputs/train}"

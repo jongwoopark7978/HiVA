@@ -85,8 +85,8 @@ export PATH="${CONDA_ENV_BIN}:${PATH}"
 ACCELERATE_BIN="${ACCELERATE_BIN:-${CONDA_ENV_BIN}/accelerate}"
 LEROBOT_TRAIN_BIN="${LEROBOT_TRAIN_BIN:-${CONDA_ENV_BIN}/lerobot-train}"
 
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 build_run_id
 RUN_NAME="${RUN_NAME:-smolvla_hiva_coeff_mt_contdur_${HIVA_DURATION_CONT_NORM}_${HIVA_SUFFIX_ATTENTION}_k${HIVA_K}_bigflow_b${BATCH_PER_GPU}_s${S}_${RUN_ID}}"

@@ -71,8 +71,8 @@ export PATH="${CONDA_ENV_BIN}:${PATH}"
 ACCELERATE_BIN="${ACCELERATE_BIN:-${CONDA_ENV_BIN}/accelerate}"
 LEROBOT_TRAIN_BIN="${LEROBOT_TRAIN_BIN:-${CONDA_ENV_BIN}/lerobot-train}"
 
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 if [[ ! -f "${SIDECAR}" ]]; then
   echo "ERROR: missing MT coefficient sidecar: ${SIDECAR}" >&2

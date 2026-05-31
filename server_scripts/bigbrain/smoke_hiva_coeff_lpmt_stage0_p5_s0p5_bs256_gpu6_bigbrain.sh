@@ -95,8 +95,8 @@ export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 SIDECAR="${SIDECAR:-${SIDECAR_ROOT}/libero_hiva_coeff_sidecar_v5_d4_6_10_wide_commit6_k${HIVA_K}_p${HIVA_DEGREE}_f${HIVA_FIT_HORIZON}_canonical_lp_mt.parquet}"
 SIDECAR_SUMMARY="${SIDECAR_SUMMARY:-${SIDECAR_ROOT}/libero_hiva_coeff_sidecar_v5_d4_6_10_wide_commit6_k${HIVA_K}_p${HIVA_DEGREE}_f${HIVA_FIT_HORIZON}_canonical_lp_mt.summary.json}"

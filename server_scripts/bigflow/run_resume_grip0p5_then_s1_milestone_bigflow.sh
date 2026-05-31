@@ -34,7 +34,8 @@ fi
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 export PATH="${CONDA_ENV_BIN}:${PATH}"
 mkdir -p "${HF_DATASETS_CACHE}"
 

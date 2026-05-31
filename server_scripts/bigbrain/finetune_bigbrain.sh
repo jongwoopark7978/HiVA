@@ -29,19 +29,9 @@ DATA_ROOT="/nfs/bigbrain/add_disk0/jongwoopark/libero_lerobot_v3_lerobotkeys"
 DATA_REPO_ID="local/libero_lerobot_v3_lerobotkeys"
 TASKS="libero_spatial,libero_object,libero_goal,libero_10"
 
-# Keep HF datasets cache on fast local disk
-# Create a unique temporary HF datasets cache for this run
-export HF_DATASETS_CACHE="$(mktemp -d /tmp/jongwoo_hf_datasets_cache_XXXXXX)"
+source "${REPO_ROOT}/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 echo "Using HF_DATASETS_CACHE=${HF_DATASETS_CACHE}"
-
-# Clean it up automatically when the script exits
-cleanup() {
-    if [ -n "${HF_DATASETS_CACHE:-}" ] && [ -d "${HF_DATASETS_CACHE}" ]; then
-        echo "Removing temporary cache: ${HF_DATASETS_CACHE}"
-        rm -rf "${HF_DATASETS_CACHE}"
-    fi
-}
-trap cleanup EXIT
 
 # export HF_DATASETS_CACHE="/nfs/bigflow/add_disk0/jongwoopark/jongwoopark_hf_datasets_cache"
 # mkdir -p "${HF_DATASETS_CACHE}"

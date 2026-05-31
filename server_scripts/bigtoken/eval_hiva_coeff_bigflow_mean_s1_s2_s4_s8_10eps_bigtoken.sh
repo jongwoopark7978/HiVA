@@ -44,8 +44,8 @@ CONDA_ENV_BIN="${CONDA_ENV_BIN:-/home/jongwoopark/miniconda3/envs/smolvla_libero
 export PATH="${CONDA_ENV_BIN}:${PATH}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 N_ACTION_STEPS="${N_ACTION_STEPS:-15}"
 CHUNK_SIZE="${CHUNK_SIZE:-15}"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import time
 from collections import deque
 from pathlib import Path
 from typing import TypedDict, Unpack
@@ -888,7 +889,24 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self._maybe_initialize_residual_flow_modules()
         self._sync_model_action_normalization()
         self._duration_execution_map = self._parse_duration_execution_map()
+        self._warn_if_duration_execution_map_will_clip()
         self.reset()
+
+    def _warn_if_duration_execution_map_will_clip(self) -> None:
+        if not self._duration_execution_map:
+            return
+
+        max_requested_horizon = max(self._duration_execution_map.values())
+        if max_requested_horizon <= int(self.config.n_action_steps):
+            return
+
+        logging.warning(
+            "HiVA duration execution map requests horizon %s, but policy.n_action_steps=%s. "
+            "Mapped execution horizons above n_action_steps will be clipped; increase "
+            "policy.n_action_steps to execute the requested remap.",
+            max_requested_horizon,
+            self.config.n_action_steps,
+        )
 
     def _maybe_load_init_smolvla_checkpoint(self) -> None:
         if not self.config.init_smolvla_checkpoint_path:
@@ -1027,6 +1045,10 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self._execution_horizon_sums_by_env = None
         self._execution_horizon_history = []
         self._execution_horizon_histories = None
+        self._model_forward_latency_sum_s = 0.0
+        self._model_forward_latency_sums_by_env = None
+        self._model_forward_latency_history_s = []
+        self._model_forward_latency_histories_s = None
 
     def _parse_duration_execution_map(self) -> dict[int, int]:
         raw_map = self.config.hiva_duration_execution_map
@@ -1073,6 +1095,8 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self._duration_inference_counts_by_env = [0 for _ in range(batch_size)]
         self._execution_horizon_sums_by_env = [0 for _ in range(batch_size)]
         self._execution_horizon_histories = [[] for _ in range(batch_size)]
+        self._model_forward_latency_sums_by_env = [0.0 for _ in range(batch_size)]
+        self._model_forward_latency_histories_s = [[] for _ in range(batch_size)]
 
     def _duration_steps_for_execution(self, duration_steps: Tensor) -> Tensor:
         execution_steps = duration_steps.reshape(-1).to(dtype=torch.long)
@@ -1093,11 +1117,15 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         max_horizon = min(actions.shape[1], int(self.config.n_action_steps))
         return execution_steps.clamp(min=1, max=max_horizon).to(dtype=torch.long)
 
-    def _record_execution_horizon(self, env_ix: int, horizon: int) -> None:
+    def _record_execution_horizon(self, env_ix: int, horizon: int, latency_s: float | None = None) -> None:
         self._last_execution_horizon = horizon
         self._duration_inference_count += 1
         self._execution_horizon_sum += horizon
         self._execution_horizon_history.append(horizon)
+        if latency_s is not None:
+            latency_s = float(latency_s)
+            self._model_forward_latency_sum_s += latency_s
+            self._model_forward_latency_history_s.append(latency_s)
 
         if self._last_execution_horizons is None:
             return
@@ -1105,6 +1133,20 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self._duration_inference_counts_by_env[env_ix] += 1
         self._execution_horizon_sums_by_env[env_ix] += horizon
         self._execution_horizon_histories[env_ix].append(horizon)
+        if latency_s is not None and self._model_forward_latency_sums_by_env is not None:
+            self._model_forward_latency_sums_by_env[env_ix] += latency_s
+            self._model_forward_latency_histories_s[env_ix].append(latency_s)
+
+    def _timed_get_action_chunk(
+        self, batch: dict[str, Tensor], noise: dict[str, Tensor] | None = None, **kwargs: Unpack[ActionSelectKwargs]
+    ) -> tuple[tuple[Tensor, Tensor], float]:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+        model_output = self._get_action_chunk(batch, noise, **kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return model_output, time.perf_counter() - start
 
     def _get_action_chunk(
         self, batch: dict[str, Tensor], noise: dict[str, Tensor] | None = None, **kwargs: Unpack[ActionSelectKwargs]
@@ -1134,7 +1176,9 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
         self.eval()
         batch = self._prepare_batch(batch)
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
-        actions, _duration_steps = self._get_action_chunk(batch, noise, **kwargs)
+        (actions, _duration_steps), latency_s = self._timed_get_action_chunk(batch, noise, **kwargs)
+        self._model_forward_latency_sum_s += float(latency_s)
+        self._model_forward_latency_history_s.append(float(latency_s))
         return actions
 
     @torch.no_grad()
@@ -1153,7 +1197,7 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
             env_ix for env_ix, queue in enumerate(self._per_env_action_queues) if len(queue) == 0
         ]
         if empty_envs:
-            actions, duration_steps = self._get_action_chunk(batch, noise)
+            (actions, duration_steps), latency_s = self._timed_get_action_chunk(batch, noise)
             execution_horizons = self._execution_horizons_from_duration(duration_steps, actions)
             if execution_horizons.numel() != len(self._per_env_action_queues):
                 raise ValueError(
@@ -1163,7 +1207,7 @@ class HiVACoeffSmolVLAPolicy(SmolVLAPolicy):
                 )
             for env_ix in empty_envs:
                 horizon = int(execution_horizons[env_ix].item())
-                self._record_execution_horizon(env_ix, horizon)
+                self._record_execution_horizon(env_ix, horizon, latency_s)
                 self._per_env_action_queues[env_ix].extend(actions[env_ix, :horizon])
 
         return torch.stack([queue.popleft() for queue in self._per_env_action_queues], dim=0)
@@ -1301,7 +1345,9 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
         self.hiva_duration_head = None
         self.hiva_duration_in_proj = None
         self.hiva_duration_out_proj = None
-        if config.hiva_duration_prediction_type == "categorical":
+        if config.hiva_duration_prediction_type == "none":
+            pass
+        elif config.hiva_duration_prediction_type == "categorical":
             if config.hiva_duration_readout == "token":
                 self.hiva_duration_token = nn.Parameter(torch.zeros(1, 1, hidden))
                 nn.init.normal_(self.hiva_duration_token, mean=0.0, std=0.02)
@@ -1424,8 +1470,11 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
         duration_len = (
             0
             if (
-                self.config.hiva_duration_prediction_type == "categorical"
-                and self.config.hiva_duration_readout == "coeff_modality_pool"
+                self.config.hiva_duration_prediction_type == "none"
+                or (
+                    self.config.hiva_duration_prediction_type == "categorical"
+                    and self.config.hiva_duration_readout == "coeff_modality_pool"
+                )
             )
             else 1
         )
@@ -1650,8 +1699,11 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
         if suffix_len < 1:
             raise ValueError(f"HiVA suffix must contain at least one token, got {suffix_len}.")
         if (
-            self.config.hiva_duration_prediction_type == "categorical"
-            and self.config.hiva_duration_readout == "coeff_modality_pool"
+            self.config.hiva_duration_prediction_type == "none"
+            or (
+                self.config.hiva_duration_prediction_type == "categorical"
+                and self.config.hiva_duration_readout == "coeff_modality_pool"
+            )
         ):
             return [1] + [0] * (suffix_len - 1)
         if suffix_len < 2:
@@ -1681,8 +1733,11 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
         all suffix queries still read the multimodal prefix/state tokens.
         """
         if (
-            self.config.hiva_duration_prediction_type == "categorical"
-            and self.config.hiva_duration_readout == "coeff_modality_pool"
+            self.config.hiva_duration_prediction_type == "none"
+            or (
+                self.config.hiva_duration_prediction_type == "categorical"
+                and self.config.hiva_duration_readout == "coeff_modality_pool"
+            )
         ):
             return make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
         if self.config.hiva_suffix_attention != "duration_reads_coeffs":
@@ -1751,7 +1806,7 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
 
     def _split_hiva_suffix_out(self, suffix_out: Tensor) -> tuple[Tensor | None, Tensor, Tensor, Tensor]:
         suffix_out = suffix_out[:, -self.hiva_suffix_len :].to(dtype=torch.float32)
-        if (
+        if self.config.hiva_duration_prediction_type == "none" or (
             self.config.hiva_duration_prediction_type == "categorical"
             and self.config.hiva_duration_readout == "coeff_modality_pool"
         ):
@@ -1773,7 +1828,9 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
             "rot": self.hiva_rot_out_proj(rot_out),
             "grip": self.hiva_grip_out_proj(grip_out),
         }
-        if self.config.hiva_duration_prediction_type == "continuous_fm":
+        if self.config.hiva_duration_prediction_type == "none":
+            duration_out_value = None
+        elif self.config.hiva_duration_prediction_type == "continuous_fm":
             if duration_out is None:
                 raise RuntimeError("Continuous duration mode expected a duration hidden state.")
             duration_out_value = self.hiva_duration_out_proj(duration_out).reshape(-1, 1, 1)
@@ -3209,6 +3266,79 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
             loss_dict.update(residual_flow_logs)
             return per_sample_loss, loss_dict
 
+        if self.config.hiva_duration_prediction_type == "none":
+            per_sample_loss = (
+                self.config.hiva_tr_loss_weight * tr_loss
+                + self.config.hiva_rot_loss_weight * rot_loss
+                + self.config.hiva_grip_loss_weight * grip_loss
+                + self.config.hiva_decoded_action_loss_weight * decoded_action_loss
+                + residual_flow_loss
+            )
+            fm_total_reduced = (
+                self.config.hiva_tr_loss_weight * tr_loss.mean()
+                + self.config.hiva_rot_loss_weight * rot_loss.mean()
+                + self.config.hiva_grip_loss_weight * grip_loss.mean()
+            )
+            zero = tr_loss.mean().detach().new_tensor(0.0)
+            loss_dict = {
+                "hiva_tr_fm_loss": tr_loss.mean().item(),
+                "hiva_rot_fm_loss": rot_loss.mean().item(),
+                "hiva_grip_fm_loss": grip_loss.mean().item(),
+                "hiva_duration_prediction_type": self.config.hiva_duration_prediction_type,
+                "hiva_duration_noisy_loss": 0.0,
+                "hiva_duration_noisy_loss_scaled": 0.0,
+                "hiva_duration_clean_loss": 0.0,
+                "hiva_duration_clean_loss_scaled": 0.0,
+                "hiva_duration_total_loss_scaled": 0.0,
+                "hiva_duration_noisy_ce": 0.0,
+                "hiva_duration_noisy_loss_unweighted_ce": 0.0,
+                "hiva_duration_acc": 0.0,
+                "hiva_duration_noisy_acc": 0.0,
+                "hiva_duration_clean_acc": 0.0,
+                "hiva_duration_pred_mean": float(self.config.hiva_dmax),
+                "hiva_duration_target_mean": duration_label_target.float().mean().item(),
+                "hiva_fm_total": fm_total_reduced.item(),
+                "hiva_duration_to_fm_ratio": zero.item(),
+                "hiva_tr_loss_weight": self.config.hiva_tr_loss_weight,
+                "hiva_rot_loss_weight": self.config.hiva_rot_loss_weight,
+                "hiva_grip_loss_weight": self.config.hiva_grip_loss_weight,
+                "hiva_duration_noisy_loss_weight": self.config.hiva_duration_noisy_loss_weight,
+                "hiva_duration_clean_loss_weight": self.config.hiva_duration_clean_loss_weight,
+                "hiva_duration_clean_enabled": 0.0,
+                "hiva_decoded_action_loss_weight": self.config.hiva_decoded_action_loss_weight,
+                "hiva_decoded_tr_loss_weight": self.config.hiva_decoded_tr_loss_weight,
+                "hiva_decoded_rot_loss_weight": self.config.hiva_decoded_rot_loss_weight,
+                "hiva_decoded_grip_loss_weight": self.config.hiva_decoded_grip_loss_weight,
+                "hiva_decoded_prefix_weight": self.config.hiva_decoded_prefix_weight,
+                "hiva_decoded_post_duration_exec_weight": self.config.hiva_decoded_post_duration_exec_weight,
+                "hiva_decoded_preview_weight": self.config.hiva_decoded_preview_weight,
+                "hiva_decoded_terminal_weight": self.config.hiva_decoded_terminal_weight,
+                "hiva_decoded_loss_beta": self.config.hiva_decoded_loss_beta,
+                "hiva_decoded_tr_loss_beta": self.config.hiva_decoded_tr_loss_beta,
+                "hiva_decoded_rot_loss_beta": self.config.hiva_decoded_rot_loss_beta,
+                "hiva_decoded_grip_loss_beta": self.config.hiva_decoded_grip_loss_beta,
+                "hiva_duration_noisy_sigma": self.config.hiva_duration_noisy_sigma,
+                "hiva_duration_loss": "none",
+                "hiva_duration_readout": "none",
+                "hiva_suffix_attention": self.config.hiva_suffix_attention,
+                "hiva_duration_head_type": self.config.hiva_duration_head_type,
+                "hiva_duration_ffn_hidden_mult": self.config.hiva_duration_ffn_hidden_mult,
+                "hiva_duration_ffn_alpha_init": self.config.hiva_duration_ffn_alpha_init,
+                "hiva_duration_ffn_alpha": 0.0,
+                "hiva_basis_mode": self.config.hiva_basis_mode,
+                "hiva_dmax": self.config.hiva_dmax,
+                "hiva_fit_horizon": self.config.hiva_fit_horizon,
+                "hiva_k": self.config.hiva_k,
+                "hiva_degree": self.config.hiva_degree,
+                "hiva_degree_tr": self.config.hiva_degree_tr,
+                "hiva_degree_rot": self.config.hiva_degree_rot,
+                "hiva_degree_grip": self.config.hiva_degree_grip,
+                "hiva_suffix_len": self.hiva_suffix_len,
+            }
+            loss_dict.update(decoded_logs)
+            loss_dict.update(residual_flow_logs)
+            return per_sample_loss, loss_dict
+
         duration_ce = F.cross_entropy(duration_logits.to(dtype=torch.float32), duration_class_target, reduction="none")
         duration_noisy_weights = self.duration_noisy_weights(time).to(
             device=duration_ce.device,
@@ -3487,7 +3617,21 @@ class HiVACoeffVLAFlowMatching(VLAFlowMatching):
 
         coeff_hidden = None
         final_timestep = torch.zeros(bsize, dtype=torch.float32, device=device)
-        if self.config.hiva_duration_prediction_type == "continuous_fm":
+        if self.config.hiva_duration_prediction_type == "none":
+            duration_steps = torch.full(
+                (bsize,),
+                int(self.config.hiva_dmax),
+                dtype=torch.long,
+                device=device,
+            )
+            if self.config.hiva_residual_enabled or self.config.hiva_residual_flow_enabled:
+                _pred_final, _duration_output, coeff_hidden = self._forward_hiva_suffix_with_prefix_cache(
+                    prefix_pad_masks=prefix_pad_masks,
+                    past_key_values=past_key_values,
+                    coeffs=x_t,
+                    timestep=final_timestep,
+                )
+        elif self.config.hiva_duration_prediction_type == "continuous_fm":
             duration_raw = self.unnormalize_duration(duration_t).reshape(-1)
             duration_steps = self._duration_steps_from_continuous(duration_raw)
             if self.config.hiva_residual_enabled or self.config.hiva_residual_flow_enabled:

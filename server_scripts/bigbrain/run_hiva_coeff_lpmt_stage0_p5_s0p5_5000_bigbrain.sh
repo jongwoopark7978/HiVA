@@ -68,6 +68,7 @@ INIT_SMOLVLA="${INIT_SMOLVLA:-/home/jongwoopark/lerobot/smolvla_libero}"
 
 GPU_IDS="${GPU_IDS:-6,7}"
 NUM_PROCESSES="${NUM_PROCESSES:-2}"
+MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-0}"
 BATCH_PER_GPU="${BATCH_PER_GPU:-160}"
 BATCH_SIZE="${BATCH_SIZE:-${BATCH_PER_GPU}}"
 S="${S:-0.5}"
@@ -90,6 +91,9 @@ PY
 )}"
 
 HIVA_DEGREE="${HIVA_DEGREE:-5}"
+HIVA_DEGREE_TR="${HIVA_DEGREE_TR:-${HIVA_DEGREE}}"
+HIVA_DEGREE_ROT="${HIVA_DEGREE_ROT:-${HIVA_DEGREE}}"
+HIVA_DEGREE_GRIP="${HIVA_DEGREE_GRIP:-${HIVA_DEGREE}}"
 HIVA_DURATION_CLASSES="${HIVA_DURATION_CLASSES:-[4,6,10]}"
 HIVA_DMAX="${HIVA_DMAX:-10}"
 HIVA_FIT_HORIZON="${HIVA_FIT_HORIZON:-15}"
@@ -149,8 +153,8 @@ export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 SIDECAR="${SIDECAR:-${SIDECAR_ROOT}/libero_hiva_coeff_sidecar_v5_d4_6_10_wide_commit6_k${HIVA_K}_p${HIVA_DEGREE}_f${HIVA_FIT_HORIZON}_canonical_lp_mt.parquet}"
 SIDECAR_SUMMARY="${SIDECAR_SUMMARY:-${SIDECAR_ROOT}/libero_hiva_coeff_sidecar_v5_d4_6_10_wide_commit6_k${HIVA_K}_p${HIVA_DEGREE}_f${HIVA_FIT_HORIZON}_canonical_lp_mt.summary.json}"
@@ -190,6 +194,7 @@ echo "RUN_NAME=${RUN_NAME}"
 echo "OUTPUT_DIR=${OUTPUT_DIR}"
 echo "GPU_IDS=${GPU_IDS}"
 echo "NUM_PROCESSES=${NUM_PROCESSES}"
+echo "MAIN_PROCESS_PORT=${MAIN_PROCESS_PORT}"
 echo "BATCH_PER_GPU=${BATCH_PER_GPU}"
 echo "EFFECTIVE_BATCH=$((BATCH_SIZE * NUM_PROCESSES))"
 echo "S=${S}"
@@ -197,6 +202,10 @@ echo "TOTAL_STEPS=${TOTAL_STEPS}"
 echo "SCHEDULER_WARMUP_STEPS=${SCHEDULER_WARMUP_STEPS}"
 echo "SCHEDULER_DECAY_STEPS=${SCHEDULER_DECAY_STEPS}"
 echo "SAVE_STEPS=${SAVE_STEPS}"
+echo "HIVA_DEGREE=${HIVA_DEGREE}"
+echo "HIVA_DEGREE_TR=${HIVA_DEGREE_TR}"
+echo "HIVA_DEGREE_ROT=${HIVA_DEGREE_ROT}"
+echo "HIVA_DEGREE_GRIP=${HIVA_DEGREE_GRIP}"
 echo "SIDECAR=${SIDECAR}"
 echo "SIDECAR_SUMMARY=${SIDECAR_SUMMARY}"
 echo "DATA_ROOT=${DATA_ROOT}"
@@ -216,9 +225,9 @@ TRAIN_ARGS=(
   --policy.hiva_fit_horizon="${HIVA_FIT_HORIZON}"
   --policy.hiva_k="${HIVA_K}"
   --policy.hiva_degree="${HIVA_DEGREE}"
-  --policy.hiva_degree_tr="${HIVA_DEGREE}"
-  --policy.hiva_degree_rot="${HIVA_DEGREE}"
-  --policy.hiva_degree_grip="${HIVA_DEGREE}"
+  --policy.hiva_degree_tr="${HIVA_DEGREE_TR}"
+  --policy.hiva_degree_rot="${HIVA_DEGREE_ROT}"
+  --policy.hiva_degree_grip="${HIVA_DEGREE_GRIP}"
   --policy.hiva_tr_loss_weight="${HIVA_TR_LOSS_WEIGHT}"
   --policy.hiva_rot_loss_weight="${HIVA_ROT_LOSS_WEIGHT}"
   --policy.hiva_grip_loss_weight="${HIVA_GRIP_LOSS_WEIGHT}"
@@ -289,6 +298,7 @@ fi
 
 "${ACCELERATE_BIN}" launch \
   --num_processes="${NUM_PROCESSES}" \
+  --main_process_port="${MAIN_PROCESS_PORT}" \
   --mixed_precision=bf16 \
   "${LEROBOT_TRAIN_BIN}" \
   "${TRAIN_ARGS[@]}"

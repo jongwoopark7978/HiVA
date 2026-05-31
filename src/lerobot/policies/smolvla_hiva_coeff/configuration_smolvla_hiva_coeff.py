@@ -76,6 +76,7 @@ class HiVACoeffSmolVLAConfig(SmolVLAConfig):
     # Duration prediction mode:
     # - "categorical": legacy learned duration query + classification head over hiva_duration_classes.
     # - "continuous_fm": duration is a noisy scalar suffix token trained with flow matching.
+    # - "none": coefficient-only CE-LP-MT mode; no duration suffix/head/loss is constructed.
     hiva_duration_prediction_type: str = "categorical"
 
     # Legacy categorical duration settings.
@@ -97,6 +98,7 @@ class HiVACoeffSmolVLAConfig(SmolVLAConfig):
     # - "coeff_modality_pool": no duration suffix token. Run only coefficient suffix tokens through the
     #   action expert, mean-pool final translation/rotation/gripper hidden states separately, concatenate
     #   them, and classify duration from a residual FFN + MLP readout.
+    # - "none": no duration readout; valid only with hiva_duration_prediction_type="none".
     # Continuous-FM duration ignores this field because it uses a noisy scalar duration suffix token.
     hiva_duration_readout: str = "token"
 
@@ -230,7 +232,7 @@ class HiVACoeffSmolVLAConfig(SmolVLAConfig):
             self.hiva_suffix_attention = (
                 "full"
                 if (
-                    self.hiva_duration_prediction_type == "continuous_fm"
+                    self.hiva_duration_prediction_type in ("continuous_fm", "none")
                     or self.hiva_duration_readout == "coeff_modality_pool"
                 )
                 else "duration_prefix"
@@ -239,7 +241,14 @@ class HiVACoeffSmolVLAConfig(SmolVLAConfig):
             )
         if self.hiva_residual_flow_init_smolvla_checkpoint_path == "":
             self.hiva_residual_flow_init_smolvla_checkpoint_path = None
-        if self.hiva_duration_prediction_type == "continuous_fm":
+        if self.hiva_duration_prediction_type == "none":
+            self.hiva_duration_head_type = "none"
+            self.hiva_duration_readout = "none"
+            self.hiva_duration_loss = "none"
+            self.hiva_duration_noisy_loss_weight = 0.0
+            self.hiva_duration_clean_loss_weight = 0.0
+            self.hiva_duration_fm_loss_weight = 0.0
+        elif self.hiva_duration_prediction_type == "continuous_fm":
             self.hiva_duration_head_type = "none"
         elif self.hiva_duration_readout == "coeff_modality_pool":
             # The pooled 3H readout always uses its own residual FFN + MLP classifier.
@@ -335,21 +344,25 @@ class HiVACoeffSmolVLAConfig(SmolVLAConfig):
                 raise ValueError(f"`{name}` must be non-negative when provided.")
         if self.hiva_duration_noisy_sigma <= 0:
             raise ValueError("`hiva_duration_noisy_sigma` must be positive.")
-        if self.hiva_duration_loss not in ("ce_mean", "mean", "duration_noisy_weights"):
+        if self.hiva_duration_loss not in ("ce_mean", "mean", "duration_noisy_weights", "none"):
             raise ValueError(
-                "`hiva_duration_loss` must be one of: 'ce_mean', 'mean', 'duration_noisy_weights'. "
+                "`hiva_duration_loss` must be one of: 'ce_mean', 'mean', 'duration_noisy_weights', 'none'. "
                 f"Got {self.hiva_duration_loss!r}."
             )
-        if self.hiva_duration_prediction_type not in ("categorical", "continuous_fm"):
+        if self.hiva_duration_loss == "none" and self.hiva_duration_prediction_type != "none":
+            raise ValueError("`hiva_duration_loss='none'` requires hiva_duration_prediction_type='none'.")
+        if self.hiva_duration_prediction_type not in ("categorical", "continuous_fm", "none"):
             raise ValueError(
-                "`hiva_duration_prediction_type` must be one of: 'categorical', 'continuous_fm'. "
+                "`hiva_duration_prediction_type` must be one of: 'categorical', 'continuous_fm', 'none'. "
                 f"Got {self.hiva_duration_prediction_type!r}."
             )
-        if self.hiva_duration_readout not in ("token", "coeff_modality_pool"):
+        if self.hiva_duration_readout not in ("token", "coeff_modality_pool", "none"):
             raise ValueError(
-                "`hiva_duration_readout` must be one of: 'token', 'coeff_modality_pool'. "
+                "`hiva_duration_readout` must be one of: 'token', 'coeff_modality_pool', 'none'. "
                 f"Got {self.hiva_duration_readout!r}."
             )
+        if self.hiva_duration_readout == "none" and self.hiva_duration_prediction_type != "none":
+            raise ValueError("`hiva_duration_readout='none'` requires hiva_duration_prediction_type='none'.")
         if self.hiva_duration_cont_norm not in ("bounded", "mean_std"):
             raise ValueError(
                 "`hiva_duration_cont_norm` must be one of: 'bounded', 'mean_std'. "
@@ -461,8 +474,15 @@ class HiVACoeffSmolVLAConfig(SmolVLAConfig):
                     "continuous_fm duration currently supports hiva_suffix_attention='full' or "
                     f"'duration_reads_coeffs'. Got {self.hiva_suffix_attention!r}."
                 )
+        elif self.hiva_duration_prediction_type == "none":
+            if self.hiva_duration_readout != "none":
+                raise ValueError("`hiva_duration_readout` must be 'none' when duration prediction is disabled.")
+            if self.hiva_duration_loss != "none":
+                raise ValueError("`hiva_duration_loss` must be 'none' when duration prediction is disabled.")
         elif self.hiva_duration_head_type == "none":
-            raise ValueError("`hiva_duration_head_type='none'` is only valid for continuous_fm duration.")
+            raise ValueError(
+                "`hiva_duration_head_type='none'` is only valid for continuous_fm or disabled duration."
+            )
 
     @property
     def action_delta_indices(self) -> list:

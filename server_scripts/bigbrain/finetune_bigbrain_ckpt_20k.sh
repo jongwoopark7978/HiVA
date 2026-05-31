@@ -34,8 +34,8 @@ PRETRAINED="/home/jongwoopark/lerobot/smolvla_libero"
 
 # Keep HF datasets cache on fast local disk
 # Create a unique temporary HF datasets cache for this run
-export HF_DATASETS_CACHE="/tmp/jongwoo_hf_datasets_cache"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "/home/jongwoopark/lerobot/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 
 # export HF_DATASETS_CACHE="/nfs/bigflow/add_disk0/jongwoopark/jongwoopark_hf_datasets_cache"

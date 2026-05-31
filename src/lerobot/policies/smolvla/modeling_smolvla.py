@@ -53,6 +53,7 @@ policy = SmolVLAPolicy.from_pretrained("lerobot/smolvla_base")
 """
 
 import math
+import time
 from collections import deque
 from typing import TypedDict, Unpack
 
@@ -248,6 +249,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self._duration_inference_count = 0
         self._execution_horizon_sum = 0
         self._execution_horizon_history = []
+        self._model_forward_latency_sum_s = 0.0
+        self._model_forward_latency_history_s = []
         self.reset()
 
     def reset(self):
@@ -260,6 +263,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self._duration_inference_count = 0
         self._execution_horizon_sum = 0
         self._execution_horizon_history = []
+        self._model_forward_latency_sum_s = 0.0
+        self._model_forward_latency_history_s = []
 
     def init_rtc_processor(self):
         """Initialize RTC processor if RTC is enabled in config."""
@@ -337,6 +342,21 @@ class SmolVLAPolicy(PreTrainedPolicy):
 
         return batch
 
+    def _record_model_forward_latency(self, latency_s: float) -> None:
+        self._model_forward_latency_sum_s += float(latency_s)
+        self._model_forward_latency_history_s.append(float(latency_s))
+
+    def _timed_get_action_chunk(
+        self, batch: dict[str, Tensor], noise: Tensor | None = None, **kwargs: Unpack[ActionSelectKwargs]
+    ):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+        model_output = self._get_action_chunk(batch, noise, **kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return model_output, time.perf_counter() - start
+
     @torch.no_grad()
     def predict_action_chunk(
         self, batch: dict[str, Tensor], noise: Tensor | None = None, **kwargs: Unpack[ActionSelectKwargs]
@@ -346,7 +366,8 @@ class SmolVLAPolicy(PreTrainedPolicy):
         batch = self._prepare_batch(batch)
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
 
-        model_output = self._get_action_chunk(batch, noise, **kwargs)
+        model_output, latency_s = self._timed_get_action_chunk(batch, noise, **kwargs)
+        self._record_model_forward_latency(latency_s)
         if self.config.use_duration_head:
             actions, _duration_steps = model_output
         else:
@@ -373,7 +394,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
 
         if self._check_get_actions_condition():
-            model_output = self._get_action_chunk(batch, noise)
+            model_output, latency_s = self._timed_get_action_chunk(batch, noise)
             if self.config.use_duration_head:
                 actions, duration_steps = model_output
                 execution_horizon = self._execution_horizon_from_duration(duration_steps, actions)
@@ -381,6 +402,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
                 self._duration_inference_count += 1
                 self._execution_horizon_sum += execution_horizon
                 self._execution_horizon_history.append(execution_horizon)
+                self._record_model_forward_latency(latency_s)
             else:
                 actions = model_output
                 execution_horizon = self.config.n_action_steps
@@ -388,6 +410,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
                 self._duration_inference_count += 1
                 self._execution_horizon_sum += execution_horizon
                 self._execution_horizon_history.append(execution_horizon)
+                self._record_model_forward_latency(latency_s)
 
             # `self.predict_action_chunk` returns a (batch_size, chunk_size, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.

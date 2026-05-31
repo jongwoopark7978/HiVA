@@ -36,6 +36,7 @@ NUM_PROCESSES="${NUM_PROCESSES:-${NUM_GPUS}}"
 BATCH_PER_GPU="${BATCH_PER_GPU:-64}"
 S="${S:-2}"
 RESUME="${RESUME:-false}"
+CONFIG_PATH="${CONFIG_PATH:-}"
 
 BASE_NUM_GPUS="${BASE_NUM_GPUS:-1}"
 BASE_BATCH_PER_GPU="${BASE_BATCH_PER_GPU:-64}"
@@ -109,8 +110,8 @@ export PATH="${CONDA_ENV_BIN}:${PATH}"
 ACCELERATE_BIN="${ACCELERATE_BIN:-${CONDA_ENV_BIN}/accelerate}"
 LEROBOT_TRAIN_BIN="${LEROBOT_TRAIN_BIN:-${CONDA_ENV_BIN}/lerobot-train}"
 
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/jongwoo_hf_datasets_cache}"
-mkdir -p "${HF_DATASETS_CACHE}"
+source "${REPO_ROOT}/server_scripts/common_hf_cache.sh"
+setup_hf_datasets_cache
 
 build_run_id
 HEAD_RUN_SUFFIX=""
@@ -153,6 +154,8 @@ echo "BATCH_PER_GPU=${BATCH_PER_GPU}"
 echo "GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE}"
 echo "S=${S}"
 echo "DATA_ROOT=${DATA_ROOT}"
+echo "HF_DATASETS_CACHE=${HF_DATASETS_CACHE}"
+echo "TMPDIR=${TMPDIR}"
 echo "SIDECAR=${SIDECAR}"
 echo "SIDECAR_SUMMARY=${SIDECAR_SUMMARY}"
 echo "INIT_SMOLVLA=${INIT_SMOLVLA}"
@@ -167,6 +170,7 @@ echo "EVAL_N_EPISODES=${EVAL_N_EPISODES}"
 echo "EVAL_TASK_IDS=${EVAL_TASK_IDS}"
 echo "EVAL_MAX_PARALLEL_TASKS=${EVAL_MAX_PARALLEL_TASKS}"
 echo "RESUME=${RESUME}"
+echo "CONFIG_PATH=${CONFIG_PATH:-<unset>}"
 echo "HIVA_TR_LOSS_WEIGHT=${HIVA_TR_LOSS_WEIGHT}"
 echo "HIVA_ROT_LOSS_WEIGHT=${HIVA_ROT_LOSS_WEIGHT}"
 echo "HIVA_GRIP_LOSS_WEIGHT=${HIVA_GRIP_LOSS_WEIGHT}"
@@ -186,7 +190,9 @@ echo "HIVA_DURATION_CLASSES=${HIVA_DURATION_CLASSES}"
 echo "HIVA_K=${HIVA_K}"
 echo "HIVA_DMAX=${HIVA_DMAX}"
 echo "HIVA_FIT_HORIZON=${HIVA_FIT_HORIZON}"
-if [[ "${HIVA_DURATION_PREDICTION_TYPE}" == "categorical" && "${HIVA_DURATION_READOUT}" == "coeff_modality_pool" ]]; then
+if [[ "${HIVA_DURATION_PREDICTION_TYPE}" == "none" ]]; then
+  echo "HIVA_SUFFIX_LEN=$((3 * HIVA_K))"
+elif [[ "${HIVA_DURATION_PREDICTION_TYPE}" == "categorical" && "${HIVA_DURATION_READOUT}" == "coeff_modality_pool" ]]; then
   echo "HIVA_SUFFIX_LEN=$((3 * HIVA_K))"
 else
   echo "HIVA_SUFFIX_LEN=$((1 + 3 * HIVA_K))"
@@ -314,6 +320,9 @@ TRAIN_ARGS=(
 TRAIN_ARGS+=("${HIVA_DURATION_EXTRA_ARGS[@]}")
 TRAIN_ARGS+=("${EVAL_EXTRA_ARGS[@]}")
 TRAIN_ARGS+=("${SAVE_EXTRA_ARGS[@]}")
+if [[ -n "${CONFIG_PATH}" ]]; then
+  TRAIN_ARGS+=(--config_path="${CONFIG_PATH}")
+fi
 TRAIN_ARGS+=("${WANDB_ARGS[@]}")
 
 "${ACCELERATE_BIN}" launch \
